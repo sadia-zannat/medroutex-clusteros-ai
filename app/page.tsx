@@ -41,6 +41,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [recommendations, setRecommendations] = useState<RouteRecommendation[]>([]);
   const [digitalTwin, setDigitalTwin] = useState<DigitalTwinResult | null>(null);
+  const [approvedRecs, setApprovedRecs] = useState<Set<string>>(new Set());
+  const [rejectedRecs, setRejectedRecs] = useState<Set<string>>(new Set());
 
   const fetchState = async () => {
     try {
@@ -166,21 +168,24 @@ export default function Home() {
       <aside className="hidden lg:flex flex-col w-16 border-r border-white/10 bg-slate-950/50 backdrop-blur-sm py-6 gap-6 items-center">
         <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600"></div>
         <div className="flex-1 flex flex-col gap-4">
-          <button className="w-10 h-10 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-400 flex items-center justify-center hover:bg-cyan-500/20 transition-colors">
+          <a href="#dashboard" className="w-10 h-10 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-400 flex items-center justify-center hover:bg-cyan-500/20 transition-colors">
             <span className="text-lg">📊</span>
-          </button>
-          <button className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
+          </a>
+          <a href="#routes" className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
             <span className="text-lg">🔀</span>
-          </button>
-          <button className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
+          </a>
+          <a href="#twin" className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
             <span className="text-lg">🔮</span>
-          </button>
-          <button className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
+          </a>
+          <a href="#jobs" className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
             <span className="text-lg">⚡</span>
-          </button>
-          <button className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
+          </a>
+          <a href="#analytics" className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
+            <span className="text-lg">📈</span>
+          </a>
+          <a href="#admin" className="w-10 h-10 rounded-lg border border-white/10 bg-white/5 text-slate-400 flex items-center justify-center hover:bg-white/10 transition-colors">
             <span className="text-lg">⚙️</span>
-          </button>
+          </a>
         </div>
       </aside>
 
@@ -193,10 +198,12 @@ export default function Home() {
               <span className="text-xl font-bold tracking-tight">ClusterOS AI</span>
             </div>
             <nav className="hidden md:flex items-center gap-6 text-sm text-slate-300">
-              <a href="#" className="hover:text-cyan-400 transition-colors">Dashboard</a>
-              <a href="#" className="hover:text-cyan-400 transition-colors">Routes</a>
-              <a href="#" className="hover:text-cyan-400 transition-colors">Analytics</a>
-              <a href="#" className="hover:text-cyan-400 transition-colors">Settings</a>
+              <a href="#dashboard" className="hover:text-cyan-400 transition-colors">Dashboard</a>
+              <a href="#routes" className="hover:text-cyan-400 transition-colors">Routes</a>
+              <a href="#twin" className="hover:text-cyan-400 transition-colors">Digital Twin</a>
+              <a href="#jobs" className="hover:text-cyan-400 transition-colors">Jobs</a>
+              <a href="#analytics" className="hover:text-cyan-400 transition-colors">Analytics</a>
+              <a href="#admin" className="hover:text-cyan-400 transition-colors">Admin</a>
             </nav>
             <button className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors">
               Connect
@@ -205,7 +212,7 @@ export default function Home() {
         </header>
 
       {/* Hero Command Center Section */}
-      <section className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
+      <section id="dashboard" className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
         <div className="grid gap-8 lg:grid-cols-3">
           {/* Left Content */}
           <div className="lg:col-span-2 space-y-6">
@@ -312,7 +319,7 @@ export default function Home() {
       </section>
 
       {/* Live GPU Risk Snapshot */}
-      <section className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
+      <section id="routes" className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
         <h2 className="text-2xl font-bold tracking-tight mb-6 bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent">
           Live GPU Risk Snapshot
         </h2>
@@ -357,7 +364,7 @@ export default function Home() {
       </section>
 
       {/* Digital Twin + Route Planner Row */}
-      <section className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
+      <section id="twin" className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
         <div className="grid gap-6 lg:grid-cols-2">
           <div>
             <h2 className="text-2xl font-bold tracking-tight mb-6 bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
@@ -453,8 +460,142 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Heatmap + Analytics Row */}
+      {/* Job Management Section */}
+      <section id="jobs" className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
+        <h2 className="text-2xl font-bold tracking-tight mb-6 bg-gradient-to-r from-amber-400 to-orange-400 bg-clip-text text-transparent">
+          Job Management
+        </h2>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
+          <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
+            <p className="text-sm text-slate-400">Active Jobs</p>
+            <p className="text-2xl font-bold text-cyan-400">{meshState.activeWorkloads}</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
+            <p className="text-sm text-slate-400">Queued Jobs</p>
+            <p className="text-2xl font-bold text-amber-400">{meshState.workloads.filter(w => !w.assignedGpuId).length}</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
+            <p className="text-sm text-slate-400">Critical Jobs</p>
+            <p className="text-2xl font-bold text-red-400">{meshState.criticalWorkloads}</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
+            <p className="text-sm text-slate-400">Completed Today</p>
+            <p className="text-2xl font-bold text-emerald-400">{Math.floor(Math.random() * 15) + 5}</p>
+          </div>
+        </div>
+        <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-white/10">
+                  <th className="text-left py-3 px-4 text-slate-400 font-medium">Workload</th>
+                  <th className="text-left py-3 px-4 text-slate-400 font-medium">Priority</th>
+                  <th className="text-left py-3 px-4 text-slate-400 font-medium">Status</th>
+                  <th className="text-left py-3 px-4 text-slate-400 font-medium">GPU</th>
+                  <th className="text-left py-3 px-4 text-slate-400 font-medium">Privacy</th>
+                  <th className="text-left py-3 px-4 text-slate-400 font-medium">Progress</th>
+                </tr>
+              </thead>
+              <tbody>
+                {meshState.workloads.slice(0, 8).map((workload) => (
+                  <tr key={workload.id} className="border-b border-white/5 last:border-0">
+                    <td className="py-3 px-4 text-slate-300 font-medium">{workload.name}</td>
+                    <td className="py-3 px-4">
+                      <span className={`text-xs px-2 py-1 rounded-full border ${
+                        workload.priority === "critical" ? "text-red-400 border-red-500/30 bg-red-500/10" :
+                        workload.priority === "high" ? "text-amber-400 border-amber-500/30 bg-amber-500/10" :
+                        "text-slate-400 border-slate-500/30 bg-slate-500/10"
+                      }`}>
+                        {workload.priority}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-slate-300">
+                      {workload.assignedGpuId ? "Running" : "Queued"}
+                    </td>
+                    <td className="py-3 px-4 text-slate-400">
+                      {workload.assignedGpuId ? `GPU-${meshState.gpus.findIndex(g => g.id === workload.assignedGpuId) + 1}` : "-"}
+                    </td>
+                    <td className="py-3 px-4 text-slate-400 text-xs">{workload.privacyPolicy}</td>
+                    <td className="py-3 px-4">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-gradient-to-r from-cyan-500 to-blue-500"
+                            style={{ width: `${workload.assignedGpuId ? Math.floor(Math.random() * 40) + 60 : 0}%` }}
+                          ></div>
+                        </div>
+                        <span className="text-xs text-slate-400 w-10">
+                          {workload.assignedGpuId ? `${Math.floor(Math.random() * 40) + 60}%` : "0%"}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      {/* Human Approval Queue */}
       <section className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
+        <h2 className="text-2xl font-bold tracking-tight mb-6 bg-gradient-to-r from-pink-400 to-rose-400 bg-clip-text text-transparent">
+          Human Approval Queue
+        </h2>
+        <div className="grid gap-4 md:grid-cols-3">
+          {recommendations.slice(0, 3).map((rec) => {
+            const isApproved = approvedRecs.has(rec.id);
+            const isRejected = rejectedRecs.has(rec.id);
+            return (
+              <div key={rec.id} className={`rounded-xl border p-4 backdrop-blur-sm ${
+                isApproved ? "border-emerald-500/30 bg-emerald-500/10" :
+                isRejected ? "border-red-500/30 bg-red-500/10" :
+                "border-white/10 bg-white/5"
+              }`}>
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <p className="font-semibold text-slate-300">{rec.workloadName}</p>
+                    <p className="text-xs text-slate-500 capitalize">{rec.action} → {rec.targetClusterType}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <span className={`text-xs px-2 py-1 rounded-full border ${
+                      rec.safetyStatus === "safe" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" :
+                      rec.safetyStatus === "warning" ? "text-amber-400 border-amber-500/30 bg-amber-500/10" :
+                      "text-red-400 border-red-500/30 bg-red-500/10"
+                    }`}>
+                      {rec.safetyStatus}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-400 mb-3">{rec.reason}</p>
+                {isApproved ? (
+                  <p className="text-xs text-emerald-400 font-medium">✓ Approved by Human Operator</p>
+                ) : isRejected ? (
+                  <p className="text-xs text-red-400 font-medium">✗ Rejected - manual review required</p>
+                ) : (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setApprovedRecs(new Set([...approvedRecs, rec.id]))}
+                      className="flex-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      onClick={() => setRejectedRecs(new Set([...rejectedRecs, rec.id]))}
+                      className="flex-1 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300 hover:bg-red-500/20 transition-colors"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Heatmap + Analytics Row */}
+      <section id="analytics" className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
         <div className="grid gap-6 lg:grid-cols-2">
           <div>
             <h2 className="text-2xl font-bold tracking-tight mb-6 bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
@@ -500,6 +641,56 @@ export default function Home() {
                 </BarChart>
               </ResponsiveContainer>
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Admin & Safety Policy */}
+      <section id="admin" className="mx-auto max-w-[1500px] px-4 py-8 md:px-6">
+        <h2 className="text-2xl font-bold tracking-tight mb-6 bg-gradient-to-r from-slate-400 to-zinc-400 bg-clip-text text-transparent">
+          Admin & Safety Policy
+        </h2>
+        <div className="grid gap-6 md:grid-cols-2">
+          <div className="rounded-xl border border-white/10 bg-white/5 p-6 backdrop-blur-sm">
+            <h3 className="text-lg font-semibold text-slate-300 mb-4">Operator Profile</h3>
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Operator:</span>
+                <span className="text-slate-300">Team Delta</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Mode:</span>
+                <span className="text-cyan-400">PHI-Zero Synthetic Demo</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Approval Policy:</span>
+                <span className="text-amber-400">Human approval required</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Data Source:</span>
+                <span className="text-slate-300">Synthetic telemetry only</span>
+              </div>
+            </div>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/5 p-6 backdrop-blur-sm">
+            <h3 className="text-lg font-semibold text-slate-300 mb-4">Privacy Rules</h3>
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-400">
+                on-prem-only
+              </span>
+              <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-xs text-blue-400">
+                edge-allowed
+              </span>
+              <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-xs text-purple-400">
+                central-allowed
+              </span>
+              <span className="rounded-full border border-pink-500/30 bg-pink-500/10 px-3 py-1 text-xs text-pink-400">
+                cloud-allowed
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-4">
+              All workloads are processed according to HIPAA-compliant privacy policies. No real patient data is used in this demo environment.
+            </p>
           </div>
         </div>
       </section>
