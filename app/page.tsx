@@ -43,6 +43,10 @@ export default function Home() {
   const [digitalTwin, setDigitalTwin] = useState<DigitalTwinResult | null>(null);
   const [approvedRecs, setApprovedRecs] = useState<Set<string>>(new Set());
   const [rejectedRecs, setRejectedRecs] = useState<Set<string>>(new Set());
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [operatorName, setOperatorName] = useState("");
+  const [operatorRole, setOperatorRole] = useState("");
+  const [showLoginModal, setShowLoginModal] = useState(false);
 
   const fetchState = async () => {
     try {
@@ -133,6 +137,21 @@ export default function Home() {
     }
   };
 
+  const handleLogin = (name: string, role: string) => {
+    setOperatorName(name);
+    setOperatorRole(role);
+    setIsLoggedIn(true);
+    setShowLoginModal(false);
+  };
+
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    setOperatorName("");
+    setOperatorRole("");
+    setApprovedRecs(new Set());
+    setRejectedRecs(new Set());
+  };
+
   if (loading) {
     return (
       <main className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
@@ -205,9 +224,27 @@ export default function Home() {
               <a href="#analytics" className="hover:text-cyan-400 transition-colors">Analytics</a>
               <a href="#admin" className="hover:text-cyan-400 transition-colors">Admin</a>
             </nav>
-            <button className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors">
-              Connect
-            </button>
+            {isLoggedIn ? (
+              <div className="flex items-center gap-3">
+                <div className="hidden sm:flex flex-col items-end">
+                  <span className="text-sm font-medium text-slate-300">{operatorName}</span>
+                  <span className="text-xs text-slate-500">{operatorRole}</span>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition-colors"
+                >
+                  Logout
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowLoginModal(true)}
+                className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors"
+              >
+                Connect
+              </button>
+            )}
           </div>
         </header>
 
@@ -569,9 +606,16 @@ export default function Home() {
                 </div>
                 <p className="text-xs text-slate-400 mb-3">{rec.reason}</p>
                 {isApproved ? (
-                  <p className="text-xs text-emerald-400 font-medium">✓ Approved by Human Operator</p>
+                  <p className="text-xs text-emerald-400 font-medium">✓ Approved by {operatorName || "Human Operator"}</p>
                 ) : isRejected ? (
                   <p className="text-xs text-red-400 font-medium">✗ Rejected - manual review required</p>
+                ) : !isLoggedIn ? (
+                  <button
+                    onClick={() => setShowLoginModal(true)}
+                    className="w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300 hover:bg-amber-500/20 transition-colors"
+                  >
+                    Operator login required
+                  </button>
                 ) : (
                   <div className="flex gap-2">
                     <button
@@ -652,23 +696,35 @@ export default function Home() {
         </h2>
         <div className="grid gap-6 md:grid-cols-2">
           <div className="rounded-xl border border-white/10 bg-white/5 p-6 backdrop-blur-sm">
-            <h3 className="text-lg font-semibold text-slate-300 mb-4">Operator Profile</h3>
+            <h3 className="text-lg font-semibold text-slate-300 mb-4">Session Status</h3>
             <div className="space-y-3 text-sm">
               <div className="flex justify-between">
+                <span className="text-slate-400">Login Status:</span>
+                <span className={isLoggedIn ? "text-emerald-400" : "text-amber-400"}>
+                  {isLoggedIn ? "Active" : "Not Logged In"}
+                </span>
+              </div>
+              <div className="flex justify-between">
                 <span className="text-slate-400">Operator:</span>
-                <span className="text-slate-300">Team Delta</span>
+                <span className="text-slate-300">{isLoggedIn ? operatorName : "Guest"}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Mode:</span>
-                <span className="text-cyan-400">PHI-Zero Synthetic Demo</span>
+                <span className="text-slate-400">Role:</span>
+                <span className="text-slate-300">{isLoggedIn ? operatorRole : "-"}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Approval Policy:</span>
-                <span className="text-amber-400">Human approval required</span>
+                <span className="text-slate-400">Approval Permission:</span>
+                <span className={isLoggedIn ? "text-emerald-400" : "text-slate-500"}>
+                  {isLoggedIn ? "Granted" : "Login Required"}
+                </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Data Source:</span>
-                <span className="text-slate-300">Synthetic telemetry only</span>
+                <span className="text-slate-400">Data Mode:</span>
+                <span className="text-cyan-400">Synthetic telemetry only</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">PHI Mode:</span>
+                <span className="text-cyan-400">PHI-Zero</span>
               </div>
             </div>
           </div>
@@ -721,6 +777,67 @@ export default function Home() {
           </p>
         </div>
       </footer>
+
+      {/* Login Modal */}
+      {showLoginModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-slate-900/90 p-6 backdrop-blur-xl shadow-2xl">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold text-slate-300">MedRouteX Operator Login</h2>
+              <button
+                onClick={() => setShowLoginModal(false)}
+                className="text-slate-400 hover:text-slate-300 transition-colors"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-slate-400 mb-2">Email</label>
+                <input
+                  type="email"
+                  placeholder="operator@medroutex.demo"
+                  className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-slate-300 placeholder-slate-500 focus:border-cyan-500/50 focus:outline-none focus:ring-1 focus:ring-cyan-500/50 transition-colors"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-2">Access Role</label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() => handleLogin("Dr. Sarah Chen", "Radiology Operator")}
+                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:border-cyan-500/50 hover:bg-cyan-500/10 transition-colors"
+                  >
+                    Radiology Operator
+                  </button>
+                  <button
+                    onClick={() => handleLogin("Admin User", "Cluster Admin")}
+                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:border-purple-500/50 hover:bg-purple-500/10 transition-colors"
+                  >
+                    Cluster Admin
+                  </button>
+                  <button
+                    onClick={() => handleLogin("Safety Officer", "Safety Reviewer")}
+                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:border-amber-500/50 hover:bg-amber-500/10 transition-colors"
+                  >
+                    Safety Reviewer
+                  </button>
+                </div>
+              </div>
+              <button
+                onClick={() => handleLogin("Demo Operator", "Radiology Operator")}
+                className="w-full rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors"
+              >
+                Login
+              </button>
+              <p className="text-xs text-slate-500 text-center">
+                Synthetic demo login only — no real patient or account data.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </main>
   );
