@@ -5,11 +5,14 @@ import { deriveMeshStateFromOperationalTwin } from "@/lib/twin-core/compatibilit
 export async function GET() {
   // Get canonical Operational Twin state
   const operationalTwinState = getOperationalTwinState();
+  const scenario = operationalTwinState.overallStatus === "critical"
+    ? "medroutex-stroke-crisis"
+    : "normal_day";
   
   // Derive legacy MeshState from Operational Twin for dashboard compatibility
   const meshState = deriveMeshStateFromOperationalTwin(
     operationalTwinState,
-    "normal_day"
+    scenario
   );
   
   return NextResponse.json(meshState, {
