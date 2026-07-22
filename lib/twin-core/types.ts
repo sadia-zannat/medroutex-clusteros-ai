@@ -159,6 +159,41 @@ export type TwinScenarioStatus =
   | "failed";
 
 /**
+ * Human decision for a simulation recommendation
+ */
+export type TwinApprovalDecision = "approve" | "reject";
+
+/**
+ * Canonical operator evidence for a finalized human decision
+ */
+export interface TwinApprovalRecord {
+  decision: TwinApprovalDecision;
+  satisfied: boolean;
+  recommendationId: string;
+  targetGpuId: string;
+  operatorName: string;
+  operatorRole: string;
+  decidedAt: string;
+  simulationOnly: true;
+}
+
+/**
+ * Immutable audit evidence for a human approval decision
+ */
+export interface TwinApprovalAuditEvent {
+  id: string;
+  eventType: "human-approval-decision";
+  decision: TwinApprovalDecision;
+  simulationId: string;
+  recommendationId: string;
+  targetGpuId: string;
+  operatorName: string;
+  operatorRole: string;
+  timestamp: string;
+  simulationOnly: true;
+}
+
+/**
  * Projected change for an entity metric in simulation
  */
 export interface TwinProjectedChange {
@@ -186,6 +221,10 @@ export interface TwinSimulationState {
   predictedRiskReductionPercent: number;
   predictedRecoveryMinutes: number;
   requiresHumanApproval: boolean;
+  recommendationId: string;
+  recommendedTargetGpuId: string;
+  approvalSatisfied: boolean;
+  approval: TwinApprovalRecord | null;
   simulationOnly: true;
   warnings: string[];
 }
@@ -206,6 +245,7 @@ export interface OperationalTwinState {
   relationships: TwinRelationship[];
   latestTelemetry: TwinTelemetryPoint[];
   snapshots: TwinSnapshot[];
+  approvalAuditEvents: TwinApprovalAuditEvent[];
   activeSimulation: TwinSimulationState | null;
   overallStatus: TwinOperationalStatus;
   overallHealthScore: number;

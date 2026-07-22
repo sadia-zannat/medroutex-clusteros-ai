@@ -565,6 +565,7 @@ export function createInitialOperationalTwinState(): OperationalTwinState {
     relationships,
     latestTelemetry,
     snapshots,
+    approvalAuditEvents: [],
     activeSimulation: null,
     overallStatus: "healthy",
     overallHealthScore: 88,
@@ -760,6 +761,10 @@ export function applyCrisisScenario(state: OperationalTwinState): OperationalTwi
     predictedRiskReductionPercent: 67,
     predictedRecoveryMinutes: 2,
     requiresHumanApproval: true,
+    recommendationId: "rec-workload-stroke-ct-001-0",
+    recommendedTargetGpuId: "gpu-central-7",
+    approvalSatisfied: false,
+    approval: null,
     simulationOnly: true,
     warnings: [
       "Cloud route blocked by privacy policy for stroke CT workload",
