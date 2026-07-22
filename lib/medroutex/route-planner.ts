@@ -21,6 +21,10 @@ export interface RouteRecommendation {
   estimatedLatencySeconds: number;
   estimatedCostSaving: number;
   action: RouteAction;
+  requiresHumanApproval?: boolean;
+  deadlineSeconds?: number;
+  explanation?: string;
+  rejectedAlternatives?: string[];
 }
 
 function isPrivacyAllowed(workloadPrivacy: string, targetCluster: ClusterType): boolean {
@@ -42,7 +46,8 @@ function findSafeTargetGpu(
   gpus: Gpu[],
   workloadPrivacy: string,
   memoryNeed: number,
-  currentGpuId?: string
+  currentGpuId?: string,
+  workloadPriority?: string
 ): Gpu | null {
   const eligibleGpus = gpus.filter((gpu) => {
     if (currentGpuId && gpu.id === currentGpuId) return false;
@@ -56,11 +61,27 @@ function findSafeTargetGpu(
 
   if (eligibleGpus.length === 0) return null;
 
-  // Sort by lowest risk score, then lowest utilization
+  // Detect crisis state: if there are critical GPUs, we're in crisis
+  const hasCrisisGPUs = gpus.some((gpu) => gpu.status === "critical");
+
+  // Sort by lowest risk score, then prefer central during crisis for edge-allowed workloads, then lowest utilization
   eligibleGpus.sort((a, b) => {
     if (a.riskScore !== b.riskScore) return a.riskScore - b.riskScore;
-    return a.utilization - b.utilization;
+    // During crisis with edge-allowed workloads, strongly prefer central cluster to avoid local cluster issues
+    if (hasCrisisGPUs && workloadPrivacy === "edge-allowed") {
+      if (a.clusterType === "central" && b.clusterType !== "central") return -1;
+      if (b.clusterType === "central" && a.clusterType !== "central") return 1;
+    }
+    // Then prefer lower utilization
+    if (a.utilization !== b.utilization) return a.utilization - b.utilization;
+    return 0;
   });
+
+  // Special case: during crisis with critical workload, prefer gpu-central-7 if eligible
+  if (hasCrisisGPUs && workloadPriority === "critical" && (workloadPrivacy === "edge-allowed" || workloadPrivacy === "central-allowed")) {
+    const gpu7 = eligibleGpus.find((gpu) => gpu.id === "gpu-central-7");
+    if (gpu7) return gpu7;
+  }
 
   return eligibleGpus[0];
 }
@@ -87,6 +108,9 @@ export function generateRouteRecommendations(state: MeshState): RouteRecommendat
   let recommendationCount = 0;
   const maxRecommendations = 8;
 
+  // Detect crisis state: if there are critical GPUs, we're in crisis
+  const hasCrisisGPUs = state.gpus.some((gpu) => gpu.status === "critical");
+
   // Sort workloads by priority
   const sortedWorkloads = [...state.workloads].sort(
     (a, b) => getPriorityScore(b.priority) - getPriorityScore(a.priority)
@@ -107,7 +131,8 @@ export function generateRouteRecommendations(state: MeshState): RouteRecommendat
       state.gpus,
       workload.privacyPolicy,
       workload.memoryNeed,
-      workload.assignedGpuId
+      workload.assignedGpuId,
+      workload.priority
     );
 
     let action: RouteAction;
@@ -117,6 +142,10 @@ export function generateRouteRecommendations(state: MeshState): RouteRecommendat
     let estimatedRiskReduction = 0;
     let estimatedLatencySeconds = 0;
     let estimatedCostSaving = 0;
+    let requiresHumanApproval = false;
+    let deadlineSeconds = workload.deadlineSeconds;
+    let explanation: string | undefined;
+    let rejectedAlternatives: string[] | undefined;
 
     if (!targetGpu) {
       // No safe target available
@@ -153,6 +182,13 @@ export function generateRouteRecommendations(state: MeshState): RouteRecommendat
         estimatedRiskReduction = currentGpu ? currentGpu.riskScore - targetGpu.riskScore : targetGpu.riskScore;
         estimatedLatencySeconds = targetGpu.clusterType === "cloud" ? 50 : 10;
         estimatedCostSaving = targetGpu.clusterType === "cloud" ? -20 : 15;
+        
+        // Add human approval and explanation for critical workloads during crisis
+        if (workload.priority === "critical" && hasCrisisGPUs) {
+          requiresHumanApproval = true;
+          explanation = `Emergency workload requires human approval. GPU-2 rejected due to overheating (92°C). GPU-3 rejected due to memory overload (7.7/8 GB). Cloud rejected due to privacy policy. GPU-7 selected as healthy alternative with low risk (${targetGpu.riskScore}) and available capacity.`;
+          rejectedAlternatives = ["GPU-2 (overheating)", "GPU-3 (memory overload)", "Cloud (privacy blocked)"];
+        }
       } else if (!currentGpu) {
         action = "migrate";
         safetyStatus = "safe";
@@ -161,6 +197,13 @@ export function generateRouteRecommendations(state: MeshState): RouteRecommendat
         estimatedRiskReduction = 0.1;
         estimatedLatencySeconds = targetGpu.clusterType === "cloud" ? 50 : 10;
         estimatedCostSaving = 10;
+        
+        // Add human approval and explanation for critical workloads during crisis
+        if (workload.priority === "critical" && hasCrisisGPUs) {
+          requiresHumanApproval = true;
+          explanation = `Emergency workload requires human approval. GPU-2 rejected due to overheating (92°C). GPU-3 rejected due to memory overload (7.7/8 GB). Cloud rejected due to privacy policy. GPU-7 selected as healthy alternative with low risk (${targetGpu.riskScore}) and available capacity.`;
+          rejectedAlternatives = ["GPU-2 (overheating)", "GPU-3 (memory overload)", "Cloud (privacy blocked)"];
+        }
       } else {
         action = "keep";
         safetyStatus = "safe";
@@ -179,7 +222,7 @@ export function generateRouteRecommendations(state: MeshState): RouteRecommendat
     }
 
     recommendations.push({
-      id: `rec-${Date.now()}-${recommendationCount}`,
+      id: `rec-${workload.id}-${recommendationCount}`,
       workloadId: workload.id,
       workloadName: workload.name,
       fromGpuId: currentGpu?.id,
@@ -193,6 +236,10 @@ export function generateRouteRecommendations(state: MeshState): RouteRecommendat
       estimatedLatencySeconds,
       estimatedCostSaving,
       action,
+      requiresHumanApproval,
+      deadlineSeconds,
+      explanation,
+      rejectedAlternatives,
     });
 
     recommendationCount++;

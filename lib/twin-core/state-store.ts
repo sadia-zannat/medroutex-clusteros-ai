@@ -8,7 +8,7 @@
 import {
   OperationalTwinState,
 } from "./types";
-import { createInitialOperationalTwinState } from "./seed";
+import { createInitialOperationalTwinState, applyCrisisScenario } from "./seed";
 
 /**
  * Module-level in-memory state storage
@@ -65,4 +65,14 @@ export function getOperationalTwinSummary() {
     lastSynchronizedAt: state.lastSynchronizedAt,
     simulationOnly: state.simulationOnly,
   };
+}
+
+/**
+ * Apply the MedRouteX demo crisis scenario to the operational twin state
+ * Replaces the entire state with the crisis scenario applied
+ */
+export function applyCrisisScenarioToState(): OperationalTwinState {
+  const currentState = getOperationalTwinState();
+  operationalTwinState = applyCrisisScenario(currentState);
+  return operationalTwinState;
 }

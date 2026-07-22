@@ -11,6 +11,8 @@ import {
   TwinRelationship,
   TwinTelemetryPoint,
   TwinSnapshot,
+  TwinSimulationState,
+  TwinProjectedChange,
   INFRASTRUCTURE_CLINICAL_DISCLAIMER,
 } from "./types";
 
@@ -569,5 +571,223 @@ export function createInitialOperationalTwinState(): OperationalTwinState {
     overallRiskScore: 12,
     simulationOnly: true,
     clinicalDisclaimer: INFRASTRUCTURE_CLINICAL_DISCLAIMER,
+  };
+}
+
+/**
+ * Apply the MedRouteX demo crisis scenario to the operational twin state
+ * This represents the emergency stroke CT workload with GPU failures
+ * Idempotent: if crisis entities already exist, returns current state without duplication
+ */
+export function applyCrisisScenario(state: OperationalTwinState): OperationalTwinState {
+  const crisisTimestamp = "2024-01-15T10:32:00.000Z";
+
+  // Check if crisis is already applied (idempotent)
+  const crisisEntityIds = ["compute-local-gpu-02", "compute-local-gpu-03", "compute-central-gpu-07"];
+  const crisisAlreadyApplied = crisisEntityIds.some((id) =>
+    state.entities.some((e) => e.id === id)
+  );
+
+  if (crisisAlreadyApplied) {
+    // Crisis already applied, return current state
+    return state;
+  }
+
+  // Create crisis-specific entities (additional GPUs)
+  const crisisEntities: TwinEntity[] = [
+    // Local GPU-2 (overheating)
+    {
+      id: "compute-local-gpu-02",
+      name: "Local GPU Compute Node 02",
+      entityType: "compute-node",
+      zoneId: "zone-gpu-datacenter",
+      parentEntityId: "zone-gpu-datacenter",
+      status: "critical",
+      healthScore: 25,
+      riskScore: 75,
+      lastUpdated: crisisTimestamp,
+      sourceTypes: ["synthetic"],
+      attributes: {
+        temperatureC: 92,
+        utilizationPercent: 95,
+        memoryUsedMiB: 8188,
+        memoryTotalMiB: 8188,
+        powerDrawW: 380,
+      },
+      tags: ["gpu", "ai-inference", "overheating"],
+      isStale: false,
+      isSimulationOnly: true,
+    },
+    // Local GPU-3 (memory overloaded)
+    {
+      id: "compute-local-gpu-03",
+      name: "Local GPU Compute Node 03",
+      entityType: "compute-node",
+      zoneId: "zone-gpu-datacenter",
+      parentEntityId: "zone-gpu-datacenter",
+      status: "critical",
+      healthScore: 30,
+      riskScore: 70,
+      lastUpdated: crisisTimestamp,
+      sourceTypes: ["synthetic"],
+      attributes: {
+        temperatureC: 78,
+        utilizationPercent: 88,
+        memoryUsedMiB: 7900,
+        memoryTotalMiB: 8188,
+        powerDrawW: 320,
+      },
+      tags: ["gpu", "ai-inference", "memory-overload"],
+      isStale: false,
+      isSimulationOnly: true,
+    },
+    // Central GPU-7 (healthy - recommended target)
+    {
+      id: "compute-central-gpu-07",
+      name: "Central GPU Compute Node 07",
+      entityType: "compute-node",
+      zoneId: "zone-gpu-datacenter",
+      parentEntityId: "zone-gpu-datacenter",
+      status: "healthy",
+      healthScore: 92,
+      riskScore: 8,
+      lastUpdated: crisisTimestamp,
+      sourceTypes: ["synthetic"],
+      attributes: {
+        temperatureC: 52,
+        utilizationPercent: 25,
+        memoryUsedMiB: 2048,
+        memoryTotalMiB: 16384,
+        powerDrawW: 150,
+      },
+      tags: ["gpu", "ai-inference", "recommended"],
+      isStale: false,
+      isSimulationOnly: true,
+    },
+  ];
+
+  // Add crisis-specific telemetry
+  const crisisTelemetry: TwinTelemetryPoint[] = [
+    {
+      id: "tele-gpu02-temp-001",
+      entityId: "compute-local-gpu-02",
+      metric: "temperatureC",
+      value: 92,
+      unit: "°C",
+      timestamp: crisisTimestamp,
+      receivedAt: crisisTimestamp,
+      sourceType: "synthetic",
+      sourceId: "hospital-emulator",
+      quality: "good",
+      confidence: 1,
+      isStale: false,
+    },
+    {
+      id: "tele-gpu02-util-001",
+      entityId: "compute-local-gpu-02",
+      metric: "utilizationPercent",
+      value: 95,
+      unit: "%",
+      timestamp: crisisTimestamp,
+      receivedAt: crisisTimestamp,
+      sourceType: "synthetic",
+      sourceId: "hospital-emulator",
+      quality: "good",
+      confidence: 1,
+      isStale: false,
+    },
+    {
+      id: "tele-gpu03-memory-001",
+      entityId: "compute-local-gpu-03",
+      metric: "memoryUsedMiB",
+      value: 7900,
+      unit: "MiB",
+      timestamp: crisisTimestamp,
+      receivedAt: crisisTimestamp,
+      sourceType: "synthetic",
+      sourceId: "hospital-emulator",
+      quality: "good",
+      confidence: 1,
+      isStale: false,
+    },
+    {
+      id: "tele-gpu07-temp-001",
+      entityId: "compute-central-gpu-07",
+      metric: "temperatureC",
+      value: 52,
+      unit: "°C",
+      timestamp: crisisTimestamp,
+      receivedAt: crisisTimestamp,
+      sourceType: "synthetic",
+      sourceId: "hospital-emulator",
+      quality: "good",
+      confidence: 1,
+      isStale: false,
+    },
+  ];
+
+  // Create crisis simulation state
+  const activeSimulation: TwinSimulationState = {
+    id: "sim-crisis-001",
+    scenarioId: "medroutex-stroke-crisis",
+    scenarioName: "Emergency Stroke CT Workload Crisis",
+    status: "awaiting-approval",
+    startedAt: crisisTimestamp,
+    baselineSnapshotId: "snapshot-initial-001",
+    projectedChanges: [
+      {
+        entityId: "compute-local-gpu-02",
+        metric: "temperatureC",
+        beforeValue: 45,
+        afterValue: 92,
+        explanation: "GPU-2 overheating due to emergency workload",
+      },
+      {
+        entityId: "compute-local-gpu-03",
+        metric: "memoryUsedMiB",
+        beforeValue: 1024,
+        afterValue: 7900,
+        explanation: "GPU-3 memory overload from critical workloads",
+      },
+      {
+        entityId: "compute-central-gpu-07",
+        metric: "utilizationPercent",
+        beforeValue: 25,
+        afterValue: 65,
+        explanation: "Recommended migration target for stroke CT workload",
+      },
+    ],
+    predictedRiskReductionPercent: 67,
+    predictedRecoveryMinutes: 2,
+    requiresHumanApproval: true,
+    simulationOnly: true,
+    warnings: [
+      "Cloud route blocked by privacy policy for stroke CT workload",
+      "Local GPU-2 critical temperature (92°C)",
+      "Local GPU-3 memory at 96% capacity",
+      "2-minute deadline for emergency stroke CT",
+    ],
+  };
+
+  // Calculate new overall metrics
+  const allEntities = [...state.entities, ...crisisEntities];
+  const criticalCount = allEntities.filter((e) => e.status === "critical").length;
+  const avgHealth = Math.round(
+    allEntities.reduce((sum, e) => sum + e.healthScore, 0) / allEntities.length
+  );
+  const avgRisk = Math.round(
+    allEntities.reduce((sum, e) => sum + e.riskScore, 0) / allEntities.length
+  );
+
+  return {
+    ...state,
+    version: state.version + 1,
+    lastSynchronizedAt: crisisTimestamp,
+    entities: allEntities,
+    latestTelemetry: [...state.latestTelemetry, ...crisisTelemetry],
+    activeSimulation,
+    overallStatus: "critical",
+    overallHealthScore: avgHealth,
+    overallRiskScore: avgRisk,
   };
 }

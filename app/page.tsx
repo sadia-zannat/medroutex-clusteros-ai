@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { MeshState, Gpu, ClusterType } from "../lib/medroutex/types";
+import type { OperationalTwinState } from "../lib/twin-core/types";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar } from "recharts";
 
 interface RouteRecommendation {
@@ -19,6 +20,10 @@ interface RouteRecommendation {
   estimatedLatencySeconds: number;
   estimatedCostSaving: number;
   action: "migrate" | "keep" | "queue" | "standby" | "manual_review";
+  requiresHumanApproval?: boolean;
+  deadlineSeconds?: number;
+  explanation?: string;
+  rejectedAlternatives?: string[];
 }
 
 interface DigitalTwinResult {
@@ -47,6 +52,10 @@ export default function Home() {
   const [operatorName, setOperatorName] = useState("");
   const [operatorRole, setOperatorRole] = useState("");
   const [showLoginModal, setShowLoginModal] = useState(false);
+  const [operationalTwinState, setOperationalTwinState] = useState<OperationalTwinState | null>(null);
+  const [twinLoading, setTwinLoading] = useState(false);
+  const [twinError, setTwinError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const fetchState = async () => {
     try {
@@ -85,29 +94,59 @@ export default function Home() {
     }
   };
 
+  const fetchOperationalTwin = async () => {
+    try {
+      setTwinLoading(true);
+      setTwinError(null);
+      const response = await fetch("/api/operational-twin/state");
+      if (!response.ok) throw new Error("Failed to fetch operational twin");
+      const data = await response.json();
+      setOperationalTwinState(data.data);
+    } catch (err) {
+      setTwinError(err instanceof Error ? err.message : "Failed to load operational twin");
+      console.error("Failed to fetch operational twin:", err);
+    } finally {
+      setTwinLoading(false);
+    }
+  };
+
   const handleReset = async () => {
     try {
+      setActionError(null);
       const response = await fetch("/api/demo/reset", { method: "POST" });
       if (!response.ok) throw new Error("Failed to reset");
       const data = await response.json();
       setMeshState(data);
+      // Update Operational Twin state from response
+      if (data.operationalTwinState) {
+        setOperationalTwinState(data.operationalTwinState);
+      } else {
+        await fetchOperationalTwin();
+      }
       await fetchRecommendations();
       await fetchDigitalTwin();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setActionError(err instanceof Error ? err.message : "Unknown error");
     }
   };
 
   const handleRunScenario = async () => {
     try {
+      setActionError(null);
       const response = await fetch("/api/demo/run", { method: "POST" });
       if (!response.ok) throw new Error("Failed to run scenario");
       const data = await response.json();
       setMeshState(data);
+      // Update Operational Twin state from response
+      if (data.operationalTwinState) {
+        setOperationalTwinState(data.operationalTwinState);
+      } else {
+        await fetchOperationalTwin();
+      }
       await fetchRecommendations();
       await fetchDigitalTwin();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setActionError(err instanceof Error ? err.message : "Unknown error");
     }
   };
 
@@ -115,6 +154,7 @@ export default function Home() {
     fetchState();
     fetchRecommendations();
     fetchDigitalTwin();
+    fetchOperationalTwin();
   }, []);
 
   const formatNumber = (value: number, decimals: number = 1): string => {
@@ -268,7 +308,7 @@ export default function Home() {
             </div>
 
             {/* Control Buttons */}
-            <div className="flex gap-3">
+            <div className="flex gap-3 flex-wrap">
               <button
                 onClick={handleReset}
                 className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors"
@@ -281,6 +321,11 @@ export default function Home() {
               >
                 Run Crisis Simulation
               </button>
+              {actionError && (
+                <span className="text-xs text-red-400 self-center">
+                  {actionError}
+                </span>
+              )}
             </div>
 
             {/* Route Chips */}
@@ -324,6 +369,74 @@ export default function Home() {
               <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
                 <p className="text-sm text-slate-400">Estimated Saving</p>
                 <p className="text-2xl font-bold text-teal-400">${meshState.estimatedSaving.toLocaleString()}</p>
+              </div>
+            </div>
+
+            {/* Operational Twin Status Panel */}
+            <div className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-4 backdrop-blur-sm">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-purple-300">Operational Twin Status</h3>
+                {twinLoading && <span className="text-xs text-slate-400">Loading...</span>}
+              </div>
+              {twinError ? (
+                <p className="text-xs text-red-400">{twinError}</p>
+              ) : operationalTwinState ? (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+                  <div>
+                    <p className="text-slate-500">Overall Status</p>
+                    <p className={`font-semibold ${
+                      operationalTwinState.overallStatus === "healthy" ? "text-emerald-400" :
+                      operationalTwinState.overallStatus === "critical" ? "text-red-400" :
+                      operationalTwinState.overallStatus === "warning" ? "text-amber-400" :
+                      "text-slate-300"
+                    }`}>
+                      {operationalTwinState.overallStatus.charAt(0).toUpperCase() + operationalTwinState.overallStatus.slice(1)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500">Health Score</p>
+                    <p className="font-semibold text-emerald-400">{operationalTwinState.overallHealthScore}%</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500">Risk Score</p>
+                    <p className="font-semibold text-amber-400">{operationalTwinState.overallRiskScore}</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500">Entity Count</p>
+                    <p className="font-semibold text-cyan-400">{operationalTwinState.entities.length}</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500">State Version</p>
+                    <p className="font-semibold text-slate-300">v{operationalTwinState.version}</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500">Active Simulation</p>
+                    <p className="font-semibold text-purple-400">
+                      {operationalTwinState.activeSimulation ? operationalTwinState.activeSimulation.status : "None"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500">Human Approval</p>
+                    <p className={`font-semibold ${
+                      operationalTwinState.activeSimulation?.requiresHumanApproval ? "text-red-400" : "text-slate-400"
+                    }`}>
+                      {operationalTwinState.activeSimulation?.requiresHumanApproval ? "Required" : "Not Required"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500">Simulation Only</p>
+                    <p className={`font-semibold ${operationalTwinState.simulationOnly ? "text-cyan-400" : "text-slate-400"}`}>
+                      {operationalTwinState.simulationOnly ? "Yes" : "No"}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">No operational twin data available</p>
+              )}
+              <div className="mt-3 pt-3 border-t border-white/10 flex flex-wrap gap-3 text-xs">
+                <span className="text-cyan-300">Synthetic Data</span>
+                <span className="text-slate-500">|</span>
+                <span className="text-purple-300">Digital Twin</span>
               </div>
             </div>
 
@@ -481,6 +594,30 @@ export default function Home() {
                       </div>
                     </div>
                     <p className="text-xs text-slate-400 mb-3">{rec.reason}</p>
+                    {rec.targetGpuId && (
+                      <p className="text-xs text-slate-500 mb-2">Target GPU: {rec.targetGpuId}</p>
+                    )}
+                    {rec.requiresHumanApproval && (
+                      <div className="mb-2">
+                        <span className="text-xs px-2 py-1 rounded-full border border-red-500/30 bg-red-500/10 text-red-400">
+                          Human Approval Required
+                        </span>
+                      </div>
+                    )}
+                    {rec.deadlineSeconds && (
+                      <p className="text-xs text-slate-500 mb-2">Deadline: {Math.floor(rec.deadlineSeconds / 60)} minutes</p>
+                    )}
+                    {rec.explanation && (
+                      <p className="text-xs text-slate-400 mb-2 italic">{rec.explanation}</p>
+                    )}
+                    {rec.rejectedAlternatives && rec.rejectedAlternatives.length > 0 && (
+                      <div className="mb-2">
+                        <p className="text-xs text-slate-500 mb-1">Rejected alternatives:</p>
+                        {rec.rejectedAlternatives.map((alt, idx) => (
+                          <p key={idx} className="text-xs text-red-400">• {alt}</p>
+                        ))}
+                      </div>
+                    )}
                     <div className="flex gap-4 text-xs">
                       <span className="text-slate-500">Latency: {rec.estimatedLatencySeconds}s</span>
                       <span className="text-slate-500">Saving: ${rec.estimatedCostSaving}</span>
