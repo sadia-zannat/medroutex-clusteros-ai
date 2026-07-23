@@ -18,8 +18,10 @@ import {
   type TwinApprovalAuditEvent,
   type TwinApprovalDecision,
   type TwinApprovalRecord,
+  type ScenarioState,
 } from "./types";
 import { createInitialOperationalTwinState, applyCrisisScenario } from "./seed";
+import { getScenarioCatalog } from "./scenario-catalog";
 import {
   ExistingGpuTelemetryAdapter,
   SyntheticHospitalTelemetryProvider,
@@ -633,6 +635,30 @@ export function getOperationalTwinSummary(): OperationalTwinSummary {
     latestTelemetryCount: state.latestTelemetry.length,
     lastSynchronizedAt: state.lastSynchronizedAt,
     simulationOnly: state.simulationOnly,
+  };
+}
+
+/**
+ * Get the current scenario state (Phase 1: read-only).
+ * This extends the canonical singleton with scenario catalog inspection.
+ */
+export function getScenarioState(): ScenarioState {
+  const state = getOperationalTwinState();
+  const catalog = getScenarioCatalog();
+  const activeSimulation = state.activeSimulation;
+
+  return {
+    activeScenarioId: activeSimulation?.scenarioId ?? null,
+    activeScenarioName: activeSimulation?.scenarioName ?? null,
+    activeScenarioStatus: activeSimulation?.status ?? null,
+    availableScenarios: catalog.scenarios,
+    canActivateScenario: activeSimulation === null,
+    lastScenarioTransitionAt: activeSimulation?.startedAt ?? null,
+    metadata: {
+      phase: 1,
+      readOnly: true,
+      mutationNotImplemented: true,
+    },
   };
 }
 

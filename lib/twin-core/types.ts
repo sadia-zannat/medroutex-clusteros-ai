@@ -1000,3 +1000,75 @@ export const INFRASTRUCTURE_CLINICAL_DISCLAIMER: string =
 
 export const RESILIENCE_MODEL_BOUNDARY: string =
   "Team Delta operational decision-support model. Not a certified hospital safety calculation.";
+
+/**
+ * Multi-domain scenario engine contracts.
+ *
+ * These contracts define deterministic scenario metadata and state for Phase 1.
+ * Phase 1 provides read-only scenario catalog and state inspection.
+ * Phase 2 will add scenario mutation and execution behavior.
+ */
+
+export type ScenarioDomain =
+  | "compute"
+  | "icu"
+  | "oxygen"
+  | "power"
+  | "network"
+  | "hospital-cascade";
+
+export type ScenarioSeverity = "low" | "medium" | "high" | "critical";
+
+export type ScenarioCategory =
+  | "normal-operations"
+  | "compute-crisis"
+  | "capacity-stress"
+  | "continuity-risk"
+  | "infrastructure-failure"
+  | "cascade-crisis";
+
+export interface ScenarioContract {
+  id: string;
+  name: string;
+  description: string;
+  domain: ScenarioDomain;
+  severity: ScenarioSeverity;
+  category: ScenarioCategory;
+  requiresHumanApproval: boolean;
+  estimatedRecoveryMinutes: number | null;
+  affectedDomains: readonly ScenarioDomain[];
+  dependencies: readonly string[];
+  warnings: readonly string[];
+  metadata: {
+    phase: 1;
+    deterministic: true;
+    patientData: false;
+    diagnosis: false;
+    actuatorExecution: false;
+  };
+}
+
+export interface ScenarioCatalog {
+  scenarios: readonly ScenarioContract[];
+  version: string;
+  lastUpdated: string;
+  metadata: {
+    totalScenarios: number;
+    domains: readonly ScenarioDomain[];
+    categories: readonly ScenarioCategory[];
+  };
+}
+
+export interface ScenarioState {
+  activeScenarioId: string | null;
+  activeScenarioName: string | null;
+  activeScenarioStatus: TwinScenarioStatus | null;
+  availableScenarios: readonly ScenarioContract[];
+  canActivateScenario: boolean;
+  lastScenarioTransitionAt: string | null;
+  metadata: {
+    phase: 1;
+    readOnly: true;
+    mutationNotImplemented: true;
+  };
+}
