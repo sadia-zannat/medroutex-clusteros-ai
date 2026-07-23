@@ -1,6 +1,16 @@
-import type { MeshState, Gpu, Workload, ClusterType } from "./types";
+import type {
+  GuardEvaluation,
+  GuardRulerResult,
+  RankedPlan,
+} from "../twin-core/types";
+import type { ClusterType } from "./types";
 
-export type RouteAction = "migrate" | "keep" | "queue" | "standby" | "manual_review";
+export type RouteAction =
+  | "migrate"
+  | "keep"
+  | "queue"
+  | "standby"
+  | "manual_review";
 
 export type SafetyStatus = "safe" | "warning" | "blocked";
 
@@ -27,223 +37,216 @@ export interface RouteRecommendation {
   rejectedAlternatives?: string[];
 }
 
-function isPrivacyAllowed(workloadPrivacy: string, targetCluster: ClusterType): boolean {
-  switch (workloadPrivacy) {
-    case "on-prem-only":
-      return targetCluster === "local";
-    case "edge-allowed":
-      return targetCluster === "local" || targetCluster === "central";
-    case "central-allowed":
-      return targetCluster === "local" || targetCluster === "central";
-    case "cloud-allowed":
-      return true;
-    default:
-      return false;
+function round(value: number, decimalPlaces = 2): number {
+  const multiplier = 10 ** decimalPlaces;
+  return Math.round(value * multiplier) / multiplier;
+}
+
+function legacyAction(
+  action: RankedPlan["candidatePlan"]["action"]
+): RouteAction {
+  switch (action) {
+    case "keep":
+    case "migrate":
+    case "queue":
+      return action;
+    case "delay":
+      return "queue";
+    case "pause":
+    case "drop":
+    case "degraded-mode":
+    case "manual-review":
+      return "manual_review";
   }
 }
 
-function findSafeTargetGpu(
-  gpus: Gpu[],
-  workloadPrivacy: string,
-  memoryNeed: number,
-  currentGpuId?: string,
-  workloadPriority?: string
-): Gpu | null {
-  const eligibleGpus = gpus.filter((gpu) => {
-    if (currentGpuId && gpu.id === currentGpuId) return false;
-    if (!isPrivacyAllowed(workloadPrivacy, gpu.clusterType)) return false;
-    if (gpu.status !== "healthy" && gpu.status !== "idle") return false;
-    if (gpu.riskScore >= 0.35) return false;
-    if (gpu.utilization >= 80) return false;
-    if (gpu.memoryUsed + memoryNeed > gpu.memoryTotal) return false;
-    return true;
-  });
-
-  if (eligibleGpus.length === 0) return null;
-
-  // Detect crisis state: if there are critical GPUs, we're in crisis
-  const hasCrisisGPUs = gpus.some((gpu) => gpu.status === "critical");
-
-  // Sort by lowest risk score, then prefer central during crisis for edge-allowed workloads, then lowest utilization
-  eligibleGpus.sort((a, b) => {
-    if (a.riskScore !== b.riskScore) return a.riskScore - b.riskScore;
-    // During crisis with edge-allowed workloads, strongly prefer central cluster to avoid local cluster issues
-    if (hasCrisisGPUs && workloadPrivacy === "edge-allowed") {
-      if (a.clusterType === "central" && b.clusterType !== "central") return -1;
-      if (b.clusterType === "central" && a.clusterType !== "central") return 1;
-    }
-    // Then prefer lower utilization
-    if (a.utilization !== b.utilization) return a.utilization - b.utilization;
-    return 0;
-  });
-
-  // Special case: during crisis with critical workload, prefer gpu-central-7 if eligible
-  if (hasCrisisGPUs && workloadPriority === "critical" && (workloadPrivacy === "edge-allowed" || workloadPrivacy === "central-allowed")) {
-    const gpu7 = eligibleGpus.find((gpu) => gpu.id === "gpu-central-7");
-    if (gpu7) return gpu7;
-  }
-
-  return eligibleGpus[0];
+function hasPrivacyViolation(evaluation: GuardEvaluation): boolean {
+  return evaluation.violations.some(
+    (violation) =>
+      violation.ruleId === "privacy" ||
+      violation.code === "PRIVACY_POLICY_BLOCK" ||
+      violation.code === "PHI_ZERO_CLOUD_BLOCK"
+  );
 }
 
-function getPriorityScore(priority: string): number {
-  switch (priority) {
-    case "critical":
-      return 100;
-    case "high":
-      return 75;
-    case "medium":
-      return 50;
-    case "low":
-      return 25;
-    case "research":
-      return 10;
-    default:
-      return 0;
-  }
-}
-
-export function generateRouteRecommendations(state: MeshState): RouteRecommendation[] {
-  const recommendations: RouteRecommendation[] = [];
-  let recommendationCount = 0;
-  const maxRecommendations = 8;
-
-  // Detect crisis state: if there are critical GPUs, we're in crisis
-  const hasCrisisGPUs = state.gpus.some((gpu) => gpu.status === "critical");
-
-  // Sort workloads by priority
-  const sortedWorkloads = [...state.workloads].sort(
-    (a, b) => getPriorityScore(b.priority) - getPriorityScore(a.priority)
+function blockedReasonLabel(evaluation: GuardEvaluation): string {
+  const codes = new Set(
+    evaluation.violations.map((violation) => violation.code)
   );
 
-  for (const workload of sortedWorkloads) {
-    if (recommendationCount >= maxRecommendations) break;
+  if (codes.has("GPU_OVERHEATING")) return "overheating";
+  if (
+    codes.has("GPU_MEMORY_OVERLOAD") ||
+    codes.has("INSUFFICIENT_MEMORY")
+  ) {
+    return "memory overload";
+  }
+  if (
+    codes.has("PRIVACY_POLICY_BLOCK") ||
+    codes.has("PHI_ZERO_CLOUD_BLOCK")
+  ) {
+    return "privacy blocked";
+  }
+  if (codes.has("GPU_OFFLINE")) return "offline";
+  if (codes.has("TELEMETRY_UNTRUSTED")) return "telemetry untrusted";
+  if (codes.has("CRITICAL_DEADLINE_MISS")) return "deadline missed";
+  if (codes.has("INSUFFICIENT_CAPACITY")) return "insufficient capacity";
+  return "Guard blocked";
+}
 
-    const currentGpu = workload.assignedGpuId
-      ? state.gpus.find((g) => g.id === workload.assignedGpuId)
-      : null;
+function legacyBlockedTargetLabel(
+  evaluation: GuardEvaluation
+): string {
+  const candidate = evaluation.candidatePlan;
+  if (candidate.targetClusterType === "cloud") return "Cloud";
 
-    // Check if current GPU is risky
-    const currentGpuRisky = currentGpu && currentGpu.riskScore >= 0.5;
+  return candidate.targetLabel
+    .replace(/^Local\s+/i, "")
+    .replace(/^Central\s+/i, "");
+}
 
-    // Try to find a safe target
-    const targetGpu = findSafeTargetGpu(
-      state.gpus,
-      workload.privacyPolicy,
-      workload.memoryNeed,
-      workload.assignedGpuId,
-      workload.priority
+function rejectedAlternative(
+  evaluation: GuardEvaluation
+): string {
+  return `${legacyBlockedTargetLabel(evaluation)} (${blockedReasonLabel(evaluation)})`;
+}
+
+function estimatedRiskReduction(plan: RankedPlan): number {
+  const sourceHealth =
+    plan.projection.before.sourceGpuHealthPercent ??
+    plan.projection.before.targetGpuHealthPercent;
+  const targetHealth = plan.projection.before.targetGpuHealthPercent;
+  return round(Math.max(0, targetHealth - sourceHealth) / 100);
+}
+
+function safeRecommendation(
+  result: GuardRulerResult,
+  plan: RankedPlan,
+  isPlanA: boolean,
+  rejectedAlternatives: string[]
+): RouteRecommendation {
+  const candidate = plan.candidatePlan;
+  const recommendationId = isPlanA
+    ? result.recommendationId ?? candidate.recommendationId
+    : candidate.recommendationId;
+
+  return {
+    id: recommendationId,
+    workloadId: result.workloadId,
+    workloadName: result.workloadName,
+    ...(candidate.sourceGpuId ? { fromGpuId: candidate.sourceGpuId } : {}),
+    ...(candidate.targetGpuId ? { targetGpuId: candidate.targetGpuId } : {}),
+    targetClusterType: candidate.targetClusterType,
+    priority: result.context.workloadPriority,
+    reason: plan.explanation,
+    safetyStatus: "safe",
+    privacyStatus: "allowed",
+    estimatedRiskReduction: estimatedRiskReduction(plan),
+    estimatedLatencySeconds: round(candidate.latencyMs / 1000, 3),
+    estimatedCostSaving: round(
+      -plan.projection.after.expectedCostChangePercent
+    ),
+    action: legacyAction(candidate.action),
+    requiresHumanApproval:
+      isPlanA && plan.approvalRequirement.required,
+    deadlineSeconds: candidate.deadlineSeconds,
+    explanation: `${plan.planLabel}: ${result.explanation.decisionSupportDisclaimer}`,
+    ...(isPlanA && rejectedAlternatives.length > 0
+      ? { rejectedAlternatives }
+      : {}),
+  };
+}
+
+function blockedRecommendation(
+  result: GuardRulerResult,
+  evaluation: GuardEvaluation
+): RouteRecommendation {
+  const candidate = evaluation.candidatePlan;
+  const reasons = evaluation.violations.map(
+    (violation) => violation.reason
+  );
+  const reason =
+    reasons.length > 0
+      ? reasons.join(" ")
+      : "Guard rules did not permit this alternative to be ranked.";
+
+  return {
+    id: candidate.recommendationId,
+    workloadId: result.workloadId,
+    workloadName: result.workloadName,
+    ...(candidate.sourceGpuId ? { fromGpuId: candidate.sourceGpuId } : {}),
+    ...(candidate.targetGpuId ? { targetGpuId: candidate.targetGpuId } : {}),
+    targetClusterType: candidate.targetClusterType,
+    priority: result.context.workloadPriority,
+    reason,
+    safetyStatus:
+      evaluation.status === "manual-review-only" ? "warning" : "blocked",
+    privacyStatus: hasPrivacyViolation(evaluation)
+      ? "blocked"
+      : "allowed",
+    estimatedRiskReduction: 0,
+    estimatedLatencySeconds: round(candidate.latencyMs / 1000, 3),
+    estimatedCostSaving: round(-candidate.estimatedCostChangePercent),
+    action: "manual_review",
+    requiresHumanApproval: false,
+    deadlineSeconds: candidate.deadlineSeconds,
+    explanation: `Guard ${evaluation.status}: ${blockedReasonLabel(evaluation)}. ${result.explanation.decisionSupportDisclaimer}`,
+  };
+}
+
+function uniqueRecommendationIds(
+  recommendations: RouteRecommendation[]
+): RouteRecommendation[] {
+  const usedIds = new Set<string>();
+
+  return recommendations.map((recommendation, index) => {
+    if (!usedIds.has(recommendation.id)) {
+      usedIds.add(recommendation.id);
+      return recommendation;
+    }
+
+    const uniqueId = `${recommendation.id}-alternative-${index + 1}`;
+    usedIds.add(uniqueId);
+    return { ...recommendation, id: uniqueId };
+  });
+}
+
+/**
+ * Compatibility adapter for the legacy Route Planner cards.
+ *
+ * Guard determines eligibility and Ruler determines order. This adapter never
+ * recalculates safety or ranking, and it never mutates canonical state.
+ */
+export function generateRouteRecommendations(
+  result: GuardRulerResult | null
+): RouteRecommendation[] {
+  if (result === null) return [];
+
+  const rankedPlans = [
+    result.planSet.planA,
+    result.planSet.planB,
+    result.planSet.planC,
+  ].filter((plan): plan is RankedPlan => plan !== null);
+  const rejectedAlternatives = [
+    ...new Set(
+      result.planSet.blockedAlternatives.map(rejectedAlternative)
+    ),
+  ];
+  const safeRecommendations = rankedPlans.map((plan, index) =>
+    safeRecommendation(
+      result,
+      plan,
+      index === 0,
+      rejectedAlternatives
+    )
+  );
+  const blockedRecommendations =
+    result.planSet.blockedAlternatives.map((evaluation) =>
+      blockedRecommendation(result, evaluation)
     );
 
-    let action: RouteAction;
-    let safetyStatus: SafetyStatus;
-    let privacyStatus: PrivacyStatus;
-    let reason: string;
-    let estimatedRiskReduction = 0;
-    let estimatedLatencySeconds = 0;
-    let estimatedCostSaving = 0;
-    let requiresHumanApproval = false;
-    let deadlineSeconds = workload.deadlineSeconds;
-    let explanation: string | undefined;
-    let rejectedAlternatives: string[] | undefined;
-
-    if (!targetGpu) {
-      // No safe target available
-      if (currentGpuRisky) {
-        action = "manual_review";
-        safetyStatus = "blocked";
-        privacyStatus = "allowed";
-        reason = "Current GPU is risky but no safe alternative available within privacy constraints";
-      } else if (!currentGpu) {
-        action = "queue";
-        safetyStatus = "warning";
-        privacyStatus = "allowed";
-        reason = "No available GPU with sufficient capacity and privacy compliance";
-      } else {
-        action = "keep";
-        safetyStatus = "safe";
-        privacyStatus = "allowed";
-        reason = "Current assignment is optimal";
-      }
-    } else {
-      // Safe target found
-      const privacyAllowed = isPrivacyAllowed(workload.privacyPolicy, targetGpu.clusterType);
-      
-      if (!privacyAllowed) {
-        action = "manual_review";
-        safetyStatus = "blocked";
-        privacyStatus = "blocked";
-        reason = "Target cluster violates privacy policy";
-      } else if (currentGpuRisky) {
-        action = "migrate";
-        safetyStatus = "safe";
-        privacyStatus = "allowed";
-        reason = "Migrate from risky GPU to safer target";
-        estimatedRiskReduction = currentGpu ? currentGpu.riskScore - targetGpu.riskScore : targetGpu.riskScore;
-        estimatedLatencySeconds = targetGpu.clusterType === "cloud" ? 50 : 10;
-        estimatedCostSaving = targetGpu.clusterType === "cloud" ? -20 : 15;
-        
-        // Add human approval and explanation for critical workloads during crisis
-        if (workload.priority === "critical" && hasCrisisGPUs) {
-          requiresHumanApproval = true;
-          explanation = `Emergency workload requires human approval. GPU-2 rejected due to overheating (92°C). GPU-3 rejected due to memory overload (7.7/8 GB). Cloud rejected due to privacy policy. GPU-7 selected as healthy alternative with low risk (${targetGpu.riskScore}) and available capacity.`;
-          rejectedAlternatives = ["GPU-2 (overheating)", "GPU-3 (memory overload)", "Cloud (privacy blocked)"];
-        }
-      } else if (!currentGpu) {
-        action = "migrate";
-        safetyStatus = "safe";
-        privacyStatus = "allowed";
-        reason = "Assign to available healthy GPU";
-        estimatedRiskReduction = 0.1;
-        estimatedLatencySeconds = targetGpu.clusterType === "cloud" ? 50 : 10;
-        estimatedCostSaving = 10;
-        
-        // Add human approval and explanation for critical workloads during crisis
-        if (workload.priority === "critical" && hasCrisisGPUs) {
-          requiresHumanApproval = true;
-          explanation = `Emergency workload requires human approval. GPU-2 rejected due to overheating (92°C). GPU-3 rejected due to memory overload (7.7/8 GB). Cloud rejected due to privacy policy. GPU-7 selected as healthy alternative with low risk (${targetGpu.riskScore}) and available capacity.`;
-          rejectedAlternatives = ["GPU-2 (overheating)", "GPU-3 (memory overload)", "Cloud (privacy blocked)"];
-        }
-      } else {
-        action = "keep";
-        safetyStatus = "safe";
-        privacyStatus = "allowed";
-        reason = "Current assignment is acceptable";
-      }
-    }
-
-    // Check for idle GPUs that can go to standby
-    if (currentGpu && currentGpu.status === "idle" && currentGpu.standbyEligible) {
-      action = "standby";
-      safetyStatus = "safe";
-      privacyStatus = "allowed";
-      reason = "GPU can enter standby mode to save energy";
-      estimatedCostSaving = 25;
-    }
-
-    recommendations.push({
-      id: `rec-${workload.id}-${recommendationCount}`,
-      workloadId: workload.id,
-      workloadName: workload.name,
-      fromGpuId: currentGpu?.id,
-      targetGpuId: targetGpu?.id,
-      targetClusterType: targetGpu?.clusterType || currentGpu?.clusterType || "local",
-      priority: workload.priority,
-      reason,
-      safetyStatus,
-      privacyStatus,
-      estimatedRiskReduction: Math.round(estimatedRiskReduction * 100) / 100,
-      estimatedLatencySeconds,
-      estimatedCostSaving,
-      action,
-      requiresHumanApproval,
-      deadlineSeconds,
-      explanation,
-      rejectedAlternatives,
-    });
-
-    recommendationCount++;
-  }
-
-  return recommendations;
+  return uniqueRecommendationIds([
+    ...safeRecommendations,
+    ...blockedRecommendations,
+  ]);
 }

@@ -8,28 +8,65 @@
 import {
   type OperationalTwinState,
   type OperationalTwinSummary,
+  type HospitalSynchronizationSummary,
+  type EmailDeliveryRecord,
+  type GuardRulerResult,
+  type DecisionEvaluationProfile,
+  type OperationalEvent,
+  type OperationalNotification,
+  type OperationalRole,
   type TwinApprovalAuditEvent,
   type TwinApprovalDecision,
   type TwinApprovalRecord,
 } from "./types";
 import { createInitialOperationalTwinState, applyCrisisScenario } from "./seed";
+import {
+  ExistingGpuTelemetryAdapter,
+  SyntheticHospitalTelemetryProvider,
+} from "./providers";
+import { synchronizeHospitalTwin } from "./synchronization";
+import { appendHospitalSnapshot } from "./resilience";
+import {
+  appendOperationalEvents,
+  createBaselineResetEvent,
+  createConnectorFailureEvents,
+  createCrisisEvents,
+  createDecisionEvent,
+  createEmailDeliveryFailureEvent,
+  createSynchronizationFailureEvent,
+  createSynchronizationEvent,
+  MAX_EMAIL_DELIVERY_RECORDS,
+} from "./operational-events";
+import { evaluateOxygenTransition } from "./oxygen-transition";
+import { evaluateOperationalTransitions } from "./transition-events";
+import {
+  applyOxygenDemoPreset,
+  type OxygenDemoPreset,
+} from "./oxygen-demo";
+import {
+  evaluateGuardRuler,
+  type GuardRulerEvaluationOptions,
+} from "../guard-ruler/engine";
+import { createGuardRulerEvents } from "../guard-ruler/events";
 
 const MEDROUTEX_CRISIS_SCENARIO_ID = "medroutex-stroke-crisis";
 const MEDROUTEX_CRISIS_RECOMMENDATION_ID = "rec-workload-stroke-ct-001-0";
 const MEDROUTEX_CRISIS_TARGET_GPU_ID = "gpu-central-7";
-const DETERMINISTIC_APPROVAL_TIMESTAMP = "2024-01-15T10:33:00.000Z";
 const OPERATIONAL_TWIN_STATE_KEY = "__MEDROUTEX_OPERATIONAL_TWIN_STATE__" as const;
+const MAX_GUARD_RULER_EVALUATION_HISTORY = 50;
 
 type OperationalTwinGlobal = typeof globalThis & {
   [OPERATIONAL_TWIN_STATE_KEY]?: OperationalTwinState;
 };
 
+// TypeScript cannot infer this application-owned globalThis slot. This narrow
+// bridge is safe because every read and write is contained in this module.
 const operationalTwinGlobal = globalThis as OperationalTwinGlobal;
 
 export interface ApprovalDecisionInput {
   decision: TwinApprovalDecision;
   operatorName: string;
-  operatorRole: string;
+  operatorRole: OperationalRole;
   recommendationId: string;
 }
 
@@ -40,6 +77,96 @@ export interface ApprovalDecisionResult {
   state: OperationalTwinState;
   approval: TwinApprovalRecord;
   auditEvent: TwinApprovalAuditEvent;
+  insertedNotifications: OperationalNotification[];
+}
+
+export interface HospitalSynchronizationResult {
+  state: OperationalTwinState;
+  summary: HospitalSynchronizationSummary;
+  insertedNotifications: OperationalNotification[];
+}
+
+export interface NotificationAcknowledgementInput {
+  notificationId?: string;
+  acknowledgeAll?: true;
+  operatorName: string;
+  operatorRole: OperationalRole;
+}
+
+export interface NotificationAcknowledgementResult {
+  state: OperationalTwinState;
+  acknowledgedCount: number;
+}
+
+export interface GuardRulerEvaluationInput {
+  workloadId?: string;
+  recommendationId?: string;
+  evaluationProfile?: DecisionEvaluationProfile;
+}
+
+export interface GuardRulerEvaluationResult {
+  outcome: "applied" | "idempotent";
+  state: OperationalTwinState;
+  evaluation: GuardRulerResult;
+  insertedNotifications: OperationalNotification[];
+}
+
+function alignGuardRulerNotificationLifecycle(
+  state: OperationalTwinState,
+  evaluation: GuardRulerResult
+): OperationalTwinState {
+  let changed = false;
+  const resolvingEventId =
+    state.operationalEvents.find(
+      (event) =>
+        event.eventType === "plan-set-ranked" &&
+        event.metadata.evaluationKey === evaluation.evaluationKey
+    )?.id ?? `event-${evaluation.id}-plan-set-ranked`;
+  const notifications = state.notifications.map((notification) => {
+    if (notification.eventType !== "no-safe-route") {
+      return notification;
+    }
+
+    if (
+      evaluation.status === "safe-plans-available" &&
+      notification.lifecycleStatus === "active" &&
+      notification.sourceEntityIds.includes(evaluation.workloadId)
+    ) {
+      changed = true;
+      return {
+        ...notification,
+        lifecycleStatus: "resolved" as const,
+        lifecycleUpdatedAt: evaluation.evaluatedAt,
+        lifecycleStateVersion: state.version,
+        resolvedAt: evaluation.evaluatedAt,
+        resolvedByEventId: resolvingEventId,
+        resolutionReason:
+          "A later Guard evaluation found at least one safe, rankable route for this workload.",
+      };
+    }
+
+    if (
+      evaluation.status === "no-safe-route" &&
+      notification.lifecycleStatus === "resolved" &&
+      notification.metadata.evaluationKey === evaluation.evaluationKey
+    ) {
+      changed = true;
+      const reactivatedNotification = { ...notification };
+      delete reactivatedNotification.resolvedAt;
+      delete reactivatedNotification.resolvedByEventId;
+      delete reactivatedNotification.resolutionReason;
+      return {
+        ...reactivatedNotification,
+        lifecycleStatus: "active" as const,
+        lifecycleUpdatedAt: evaluation.evaluatedAt,
+        lifecycleStateVersion: state.version,
+      };
+    }
+
+    return notification;
+  });
+
+  return changed ? { ...state, notifications } : state;
 }
 
 export type ApprovalDecisionErrorCode =
@@ -67,6 +194,222 @@ function setOperationalTwinState(
   return nextState;
 }
 
+function appendGuardRulerEvaluationHistory(
+  history: readonly GuardRulerResult[],
+  evaluation: GuardRulerResult
+): GuardRulerResult[] {
+  return [
+    ...history.filter(
+      (recorded) =>
+        recorded.evaluationKey !== evaluation.evaluationKey
+    ),
+    evaluation,
+  ].slice(-MAX_GUARD_RULER_EVALUATION_HISTORY);
+}
+
+function eventResolvesNotification(
+  event: OperationalEvent,
+  notification: OperationalNotification
+): boolean {
+  if (event.correlationId !== notification.correlationId) return false;
+
+  if (notification.eventType === "human-approval-required") {
+    return (
+      event.eventType === "decision-approved" ||
+      event.eventType === "decision-rejected"
+    );
+  }
+  if (notification.eventType === "oxygen-warning") {
+    return (
+      event.eventType === "oxygen-critical" ||
+      event.eventType === "oxygen-action-required" ||
+      event.eventType === "oxygen-recovered"
+    );
+  }
+  if (notification.eventType === "oxygen-critical") {
+    return (
+      event.eventType === "oxygen-action-required" ||
+      event.eventType === "oxygen-recovered"
+    );
+  }
+  if (notification.eventType === "oxygen-action-required") {
+    return event.eventType === "oxygen-recovered";
+  }
+  return false;
+}
+
+function normalizeNotificationLifecycles(
+  state: OperationalTwinState
+): OperationalTwinState {
+  let changed = false;
+  const simulationCorrelationId = state.activeSimulation
+    ? `correlation-${state.activeSimulation.id}`
+    : null;
+
+  const notifications = state.notifications.map(
+    (notification): OperationalNotification => {
+      const runtimeNotification =
+        notification as Partial<OperationalNotification>;
+      const isTerminalOutcome =
+        notification.eventType === "decision-approved" ||
+        notification.eventType === "decision-rejected" ||
+        notification.eventType === "oxygen-recovered" ||
+        notification.eventType === "recovery-completed";
+      const isResolvedApprovalRequirement =
+        notification.eventType === "human-approval-required" &&
+        notification.correlationId === simulationCorrelationId &&
+        state.activeSimulation?.approval !== null &&
+        state.activeSimulation?.approval !== undefined;
+      const resolutionEvent = state.operationalEvents.find((event) =>
+        eventResolvesNotification(event, notification)
+      );
+      const shouldBeResolved =
+        isTerminalOutcome ||
+        isResolvedApprovalRequirement ||
+        resolutionEvent !== undefined;
+      const hasLifecycle =
+        (runtimeNotification.lifecycleStatus === "active" ||
+          runtimeNotification.lifecycleStatus === "resolved") &&
+        typeof runtimeNotification.lifecycleUpdatedAt === "string" &&
+        typeof runtimeNotification.lifecycleStateVersion === "number";
+
+      if (
+        hasLifecycle &&
+        (runtimeNotification.lifecycleStatus === "resolved" ||
+          !shouldBeResolved)
+      ) {
+        return notification;
+      }
+
+      changed = true;
+      const resolutionTimestamp = isResolvedApprovalRequirement
+        ? resolutionEvent?.timestamp ??
+          state.activeSimulation?.approval?.decidedAt ??
+          notification.timestamp
+        : resolutionEvent?.timestamp ?? notification.timestamp;
+      const resolutionStateVersion = isResolvedApprovalRequirement
+        ? resolutionEvent?.stateVersion ?? state.version
+        : resolutionEvent?.stateVersion ?? notification.stateVersion;
+
+      return {
+        ...notification,
+        lifecycleStatus: shouldBeResolved ? "resolved" : "active",
+        lifecycleUpdatedAt: shouldBeResolved
+          ? resolutionTimestamp
+          : notification.timestamp,
+        lifecycleStateVersion: shouldBeResolved
+          ? resolutionStateVersion
+          : notification.stateVersion,
+        ...(shouldBeResolved
+          ? {
+              resolvedAt: resolutionTimestamp,
+              resolvedByEventId: isResolvedApprovalRequirement
+                ? resolutionEvent?.id
+                : resolutionEvent?.id ?? notification.eventId,
+              resolutionReason: isResolvedApprovalRequirement
+                ? "A final operator decision resolved this approval requirement."
+                : resolutionEvent?.eventType === "oxygen-recovered"
+                  ? "The oxygen condition recovered after two safe confirmation cycles."
+                  : resolutionEvent
+                    ? "A higher-severity oxygen condition superseded this notification."
+                    : "This notification records a completed operational outcome.",
+            }
+          : {}),
+      };
+    }
+  );
+
+  return changed ? { ...state, notifications } : state;
+}
+
+function ensureOperationalCollections(
+  state: OperationalTwinState
+): OperationalTwinState {
+  const runtimeState = state as Partial<OperationalTwinState>;
+  const hasAllCollections =
+    Array.isArray(runtimeState.operationalEvents) &&
+    Array.isArray(runtimeState.notifications) &&
+    Array.isArray(runtimeState.emailDeliveries) &&
+    typeof runtimeState.emailDeliverySequence === "number" &&
+    Array.isArray(runtimeState.emailDeliveryReservations) &&
+    Array.isArray(runtimeState.activeIncidents) &&
+    runtimeState.oxygenAlertLifecycle !== undefined &&
+    Array.isArray(runtimeState.latestSynchronization?.failedProviders);
+
+  const stateWithCollections = hasAllCollections
+    ? state
+    : {
+        ...state,
+        operationalEvents: [
+          createBaselineResetEvent(state.version, state.generatedAt),
+        ],
+        notifications: [],
+        emailDeliveries: [],
+        emailDeliverySequence: 0,
+        emailDeliveryReservations: [],
+        latestSynchronization: {
+          ...state.latestSynchronization,
+          failedProviders: [],
+        },
+        activeIncidents: [],
+        oxygenAlertLifecycle: {
+          activeIncidentId: null,
+          correlationId: null,
+          activeSeverity: null,
+          incidentSequence: 0,
+          recoveryConfirmationCycles: 0,
+          lastEvaluatedAt: null,
+          lastEvaluationFingerprint: null,
+        },
+      };
+
+  const normalizedState =
+    normalizeNotificationLifecycles(stateWithCollections);
+  const stateWithEvaluationHistory = Array.isArray(
+    runtimeState.guardRulerEvaluationHistory
+  )
+    ? normalizedState
+    : {
+        ...normalizedState,
+        guardRulerEvaluationHistory:
+          normalizedState.latestGuardRulerEvaluation
+            ? [normalizedState.latestGuardRulerEvaluation]
+            : [],
+      };
+  if (stateWithEvaluationHistory.latestGuardRulerEvaluation) {
+    const latestEvaluation =
+      stateWithEvaluationHistory.latestGuardRulerEvaluation;
+    if (
+      stateWithEvaluationHistory.guardRulerEvaluationHistory.some(
+        (recorded) =>
+          recorded.evaluationKey === latestEvaluation.evaluationKey
+      )
+    ) {
+      return stateWithEvaluationHistory;
+    }
+    return {
+      ...stateWithEvaluationHistory,
+      guardRulerEvaluationHistory:
+        appendGuardRulerEvaluationHistory(
+          stateWithEvaluationHistory.guardRulerEvaluationHistory,
+          latestEvaluation
+        ),
+    };
+  }
+
+  const baselineEvaluation = evaluateGuardRuler(
+    stateWithEvaluationHistory,
+    {
+      evaluatedAt: stateWithEvaluationHistory.lastSynchronizedAt,
+    }
+  );
+  return {
+    ...stateWithEvaluationHistory,
+    latestGuardRulerEvaluation: baselineEvaluation,
+    guardRulerEvaluationHistory: [baselineEvaluation],
+  };
+}
+
 /**
  * Get the current operational twin state
  * Lazily initializes state using createInitialOperationalTwinState() if not already set
@@ -74,10 +417,15 @@ function setOperationalTwinState(
 export function getOperationalTwinState(): OperationalTwinState {
   const currentState = operationalTwinGlobal[OPERATIONAL_TWIN_STATE_KEY];
   if (currentState !== undefined) {
-    return currentState;
+    const normalizedState = ensureOperationalCollections(currentState);
+    return normalizedState === currentState
+      ? currentState
+      : setOperationalTwinState(normalizedState);
   }
 
-  return setOperationalTwinState(createInitialOperationalTwinState());
+  return setOperationalTwinState(
+    ensureOperationalCollections(createInitialOperationalTwinState())
+  );
 }
 
 /**
@@ -85,7 +433,9 @@ export function getOperationalTwinState(): OperationalTwinState {
  * Replaces the entire state with a new initial state
  */
 export function resetOperationalTwinState(): OperationalTwinState {
-  return setOperationalTwinState(createInitialOperationalTwinState());
+  return setOperationalTwinState(
+    ensureOperationalCollections(createInitialOperationalTwinState())
+  );
 }
 
 /**
@@ -95,6 +445,173 @@ export function resetOperationalTwinState(): OperationalTwinState {
 export function replaceOperationalTwinState(
   nextState: OperationalTwinState
 ): OperationalTwinState {
+  return setOperationalTwinState(nextState);
+}
+
+export function acknowledgeOperationalNotifications(
+  input: NotificationAcknowledgementInput
+): NotificationAcknowledgementResult {
+  const currentState = getOperationalTwinState();
+  const acknowledgedAt = new Date().toISOString();
+  let acknowledgedCount = 0;
+  let matchedNotification = input.acknowledgeAll === true;
+
+  const notifications = currentState.notifications.map((notification) => {
+    const selected =
+      input.acknowledgeAll === true ||
+      notification.id === input.notificationId;
+    if (!selected) return notification;
+    matchedNotification = true;
+    if (notification.acknowledgedAt !== undefined) return notification;
+
+    acknowledgedCount += 1;
+    return {
+      ...notification,
+      acknowledgedAt,
+      acknowledgedBy: input.operatorName,
+      acknowledgedRole: input.operatorRole,
+    };
+  });
+
+  if (!matchedNotification) {
+    return { state: currentState, acknowledgedCount: 0 };
+  }
+  if (acknowledgedCount === 0) {
+    return { state: currentState, acknowledgedCount: 0 };
+  }
+
+  const state = setOperationalTwinState({
+    ...currentState,
+    notifications,
+  });
+  return { state, acknowledgedCount };
+}
+
+export function reserveEmailDeliverySequence(): number {
+  const currentState = getOperationalTwinState();
+  const sequence = currentState.emailDeliverySequence + 1;
+  setOperationalTwinState({
+    ...currentState,
+    emailDeliverySequence: sequence,
+  });
+  return sequence;
+}
+
+/**
+ * Atomically marks all currently eligible notifications as in-flight before
+ * any provider call awaits. This prevents concurrent mutation routes from
+ * sending the same canonical notification more than once.
+ */
+export function reservePendingEmailNotifications(): OperationalNotification[] {
+  const currentState = getOperationalTwinState();
+  const reservedIds = new Set(currentState.emailDeliveryReservations);
+  const recordedNotificationIds = new Set(
+    currentState.emailDeliveries.flatMap((delivery) =>
+      delivery.notificationId ? [delivery.notificationId] : []
+    )
+  );
+  const pending = currentState.notifications.filter(
+    (notification) =>
+      notification.emailEligible &&
+      (notification.lifecycleStatus === "active" ||
+        notification.resolvedByEventId === notification.eventId) &&
+      notification.emailDeliveryStatus === undefined &&
+      !reservedIds.has(notification.id) &&
+      !recordedNotificationIds.has(notification.id)
+  );
+
+  if (pending.length === 0) return [];
+
+  setOperationalTwinState({
+    ...currentState,
+    emailDeliveryReservations: [
+      ...currentState.emailDeliveryReservations,
+      ...pending.map((notification) => notification.id),
+    ].slice(-MAX_EMAIL_DELIVERY_RECORDS),
+  });
+  return pending;
+}
+
+export function releaseEmailDeliveryReservations(
+  notificationIds: readonly string[]
+): OperationalTwinState {
+  if (notificationIds.length === 0) return getOperationalTwinState();
+
+  const currentState = getOperationalTwinState();
+  const releaseIds = new Set(notificationIds);
+  const emailDeliveryReservations =
+    currentState.emailDeliveryReservations.filter(
+      (notificationId) => !releaseIds.has(notificationId)
+    );
+  if (
+    emailDeliveryReservations.length ===
+    currentState.emailDeliveryReservations.length
+  ) {
+    return currentState;
+  }
+  return setOperationalTwinState({
+    ...currentState,
+    emailDeliveryReservations,
+  });
+}
+
+export function recordEmailDelivery(
+  delivery: EmailDeliveryRecord
+): OperationalTwinState {
+  const currentState = getOperationalTwinState();
+  const emailDeliveryReservations = delivery.notificationId
+    ? currentState.emailDeliveryReservations.filter(
+        (notificationId) => notificationId !== delivery.notificationId
+      )
+    : currentState.emailDeliveryReservations;
+  if (
+    currentState.emailDeliveries.some(
+      (existing) =>
+        existing.id === delivery.id ||
+        existing.dedupeKey === delivery.dedupeKey
+    )
+  ) {
+    return emailDeliveryReservations.length ===
+      currentState.emailDeliveryReservations.length
+      ? currentState
+      : setOperationalTwinState({
+          ...currentState,
+          emailDeliveryReservations,
+        });
+  }
+
+  const notification = delivery.notificationId
+    ? currentState.notifications.find(
+        (candidate) => candidate.id === delivery.notificationId
+      )
+    : undefined;
+
+  const notifications = delivery.notificationId && notification
+    ? currentState.notifications.map((candidate) =>
+        candidate.id === delivery.notificationId
+          ? { ...candidate, emailDeliveryStatus: delivery.status }
+          : candidate
+      )
+    : currentState.notifications;
+  let nextState: OperationalTwinState = {
+    ...currentState,
+    notifications,
+    emailDeliveryReservations,
+    emailDeliveries: [...currentState.emailDeliveries, delivery].slice(
+      -MAX_EMAIL_DELIVERY_RECORDS
+    ),
+  };
+
+  if (delivery.status === "failed" && notification) {
+    nextState = appendOperationalEvents(nextState, [
+      createEmailDeliveryFailureEvent({
+        state: nextState,
+        delivery,
+        notification,
+      }),
+    ]).state;
+  }
+
   return setOperationalTwinState(nextState);
 }
 
@@ -125,7 +642,203 @@ export function getOperationalTwinSummary(): OperationalTwinSummary {
  */
 export function applyCrisisScenarioToState(): OperationalTwinState {
   const currentState = getOperationalTwinState();
-  return setOperationalTwinState(applyCrisisScenario(currentState));
+  const timestamp = new Date().toISOString();
+  const scenarioState = applyCrisisScenario(currentState, timestamp);
+  if (scenarioState === currentState) return currentState;
+
+  const evaluation = evaluateGuardRuler(scenarioState, {
+    evaluatedAt: timestamp,
+  });
+  const stateWithEvaluation: OperationalTwinState = {
+    ...scenarioState,
+    latestGuardRulerEvaluation: evaluation,
+    guardRulerEvaluationHistory:
+      appendGuardRulerEvaluationHistory(
+        scenarioState.guardRulerEvaluationHistory,
+        evaluation
+      ),
+  };
+  const eventResult = appendOperationalEvents(stateWithEvaluation, [
+    ...createCrisisEvents(stateWithEvaluation, timestamp),
+    ...createGuardRulerEvents(evaluation),
+  ]);
+  return setOperationalTwinState(eventResult.state);
+}
+
+/**
+ * Evaluate the canonical Hospital Twin without accepting client telemetry.
+ * A matching evaluation key returns before event/notification insertion so
+ * retries cannot create suppressed-email or history noise.
+ */
+export function evaluateGuardRulerState(
+  input: GuardRulerEvaluationInput = {}
+): GuardRulerEvaluationResult {
+  const currentState = getOperationalTwinState();
+  const options: GuardRulerEvaluationOptions = {
+    ...input,
+    evaluatedAt: new Date().toISOString(),
+  };
+  const proposedEvaluation = evaluateGuardRuler(
+    currentState,
+    options
+  );
+  const existingEvaluation =
+    currentState.latestGuardRulerEvaluation;
+  const finalDecisionAlreadyRecorded =
+    input.evaluationProfile !== "no-safe-route-test" &&
+    existingEvaluation !== null &&
+    (existingEvaluation.decisionStatus === "approved" ||
+      existingEvaluation.decisionStatus === "rejected") &&
+    existingEvaluation.workloadId === proposedEvaluation.workloadId;
+
+  if (
+    existingEvaluation?.evaluationKey ===
+      proposedEvaluation.evaluationKey ||
+    finalDecisionAlreadyRecorded
+  ) {
+    return {
+      outcome: "idempotent",
+      state: currentState,
+      evaluation: existingEvaluation,
+      insertedNotifications: [],
+    };
+  }
+
+  const recordedEvaluation =
+    currentState.guardRulerEvaluationHistory.find(
+      (evaluation) =>
+        evaluation.evaluationKey ===
+        proposedEvaluation.evaluationKey
+    );
+  if (recordedEvaluation) {
+    const state = setOperationalTwinState(
+      alignGuardRulerNotificationLifecycle(
+        {
+          ...currentState,
+          latestGuardRulerEvaluation: recordedEvaluation,
+        },
+        recordedEvaluation
+      )
+    );
+    return {
+      outcome: "idempotent",
+      state,
+      evaluation: recordedEvaluation,
+      insertedNotifications: [],
+    };
+  }
+
+  const recordedEvaluationEvent =
+    currentState.operationalEvents.find(
+      (event) =>
+        event.eventType === "guard-evaluation-completed" &&
+        event.metadata.evaluationKey ===
+          proposedEvaluation.evaluationKey
+    );
+  if (recordedEvaluationEvent) {
+    const restoredEvaluation: GuardRulerResult = {
+      ...proposedEvaluation,
+      evaluatedAt: recordedEvaluationEvent.timestamp,
+    };
+    const state = setOperationalTwinState(
+      alignGuardRulerNotificationLifecycle(
+        {
+          ...currentState,
+          latestGuardRulerEvaluation: restoredEvaluation,
+        },
+        restoredEvaluation
+      )
+    );
+    return {
+      outcome: "idempotent",
+      state,
+      evaluation: restoredEvaluation,
+      insertedNotifications: [],
+    };
+  }
+
+  const stateWithEvaluation: OperationalTwinState = {
+    ...currentState,
+    latestGuardRulerEvaluation: proposedEvaluation,
+    guardRulerEvaluationHistory:
+      appendGuardRulerEvaluationHistory(
+        currentState.guardRulerEvaluationHistory,
+        proposedEvaluation
+      ),
+  };
+  const eventResult = appendOperationalEvents(
+    stateWithEvaluation,
+    createGuardRulerEvents(proposedEvaluation)
+  );
+  const state = setOperationalTwinState(
+    alignGuardRulerNotificationLifecycle(
+      eventResult.state,
+      proposedEvaluation
+    )
+  );
+  return {
+    outcome: "applied",
+    state,
+    evaluation: proposedEvaluation,
+    insertedNotifications: eventResult.insertedNotifications,
+  };
+}
+
+/**
+ * Synchronize provider telemetry into the same process-wide canonical state.
+ */
+export function synchronizeOperationalTwinState(
+  oxygenDemoPreset?: OxygenDemoPreset
+): HospitalSynchronizationResult {
+  const currentState = getOperationalTwinState();
+  const timestamp = new Date().toISOString();
+  try {
+    const stateForSynchronization = oxygenDemoPreset
+      ? applyOxygenDemoPreset(currentState, oxygenDemoPreset, timestamp)
+      : currentState;
+    const result = synchronizeHospitalTwin(
+      stateForSynchronization,
+      [
+        new SyntheticHospitalTelemetryProvider(),
+        new ExistingGpuTelemetryAdapter(),
+      ],
+      timestamp
+    );
+    const transitionEvents = evaluateOperationalTransitions(
+      currentState,
+      result.state,
+      timestamp
+    );
+    const eventResult = appendOperationalEvents(result.state, [
+      createSynchronizationEvent(result.state),
+      ...createConnectorFailureEvents(result.state),
+      ...transitionEvents,
+    ]);
+    const oxygenResult = evaluateOxygenTransition(
+      eventResult.state,
+      result.summary.timestamp
+    );
+    const state = setOperationalTwinState(oxygenResult.state);
+    return {
+      state,
+      summary: result.summary,
+      insertedNotifications: [
+        ...eventResult.insertedNotifications,
+        ...oxygenResult.insertedNotifications,
+      ],
+    };
+  } catch (error) {
+    const failureResult = appendOperationalEvents(currentState, [
+      createSynchronizationFailureEvent({
+        state: currentState,
+        timestamp,
+        reason:
+          "An emulated telemetry provider or canonical synchronization step failed before a safe state update could be committed.",
+      }),
+    ]);
+    setOperationalTwinState(failureResult.state);
+    throw error;
+  }
 }
 
 /**
@@ -158,6 +871,19 @@ export function applyApprovalDecision(
     );
   }
 
+  const guardEligiblePlanARecommendationId =
+    currentState.latestGuardRulerEvaluation?.planSet.planA
+      ?.candidatePlan.recommendationId ?? null;
+  if (
+    guardEligiblePlanARecommendationId !==
+    input.recommendationId
+  ) {
+    throw new ApprovalDecisionError(
+      "RECOMMENDATION_MISMATCH",
+      "The decision does not refer to the current Guard-eligible Plan A recommendation."
+    );
+  }
+
   if (activeSimulation.approval !== null) {
     if (activeSimulation.approval.decision !== input.decision) {
       throw new ApprovalDecisionError(
@@ -186,6 +912,7 @@ export function applyApprovalDecision(
       state: currentState,
       approval: activeSimulation.approval,
       auditEvent: existingAuditEvent,
+      insertedNotifications: [],
     };
   }
 
@@ -196,6 +923,7 @@ export function applyApprovalDecision(
     );
   }
 
+  const decisionTimestamp = new Date().toISOString();
   const approval: TwinApprovalRecord = {
     decision: input.decision,
     satisfied: input.decision === "approve",
@@ -203,7 +931,7 @@ export function applyApprovalDecision(
     targetGpuId: MEDROUTEX_CRISIS_TARGET_GPU_ID,
     operatorName: input.operatorName,
     operatorRole: input.operatorRole,
-    decidedAt: DETERMINISTIC_APPROVAL_TIMESTAMP,
+    decidedAt: decisionTimestamp,
     simulationOnly: true,
   };
 
@@ -216,14 +944,37 @@ export function applyApprovalDecision(
     targetGpuId: MEDROUTEX_CRISIS_TARGET_GPU_ID,
     operatorName: input.operatorName,
     operatorRole: input.operatorRole,
-    timestamp: DETERMINISTIC_APPROVAL_TIMESTAMP,
+    timestamp: decisionTimestamp,
     simulationOnly: true,
   };
 
-  const nextState: OperationalTwinState = {
+  const nextStateWithoutSnapshot: OperationalTwinState = {
     ...currentState,
     version: currentState.version + 1,
-    lastSynchronizedAt: DETERMINISTIC_APPROVAL_TIMESTAMP,
+    latestGuardRulerEvaluation:
+      currentState.latestGuardRulerEvaluation
+        ?.activeRecommendationId === input.recommendationId
+        ? {
+            ...currentState.latestGuardRulerEvaluation,
+            decisionStatus:
+              input.decision === "approve"
+                ? "approved"
+                : "rejected",
+          }
+        : currentState.latestGuardRulerEvaluation,
+    guardRulerEvaluationHistory:
+      currentState.guardRulerEvaluationHistory.map((evaluation) =>
+        evaluation.activeRecommendationId ===
+        input.recommendationId
+          ? {
+              ...evaluation,
+              decisionStatus:
+                input.decision === "approve"
+                  ? "approved"
+                  : "rejected",
+            }
+          : evaluation
+      ),
     activeSimulation: {
       ...activeSimulation,
       status: input.decision === "approve" ? "approved" : "rejected",
@@ -232,12 +983,21 @@ export function applyApprovalDecision(
     },
     approvalAuditEvents: [...currentState.approvalAuditEvents, auditEvent],
   };
-  setOperationalTwinState(nextState);
+  const nextState = appendHospitalSnapshot(
+    nextStateWithoutSnapshot,
+    "decision",
+    decisionTimestamp
+  );
+  const eventResult = appendOperationalEvents(nextState, [
+    createDecisionEvent(nextState, approval),
+  ]);
+  setOperationalTwinState(eventResult.state);
 
   return {
     outcome: "applied",
-    state: nextState,
+    state: eventResult.state,
     approval,
     auditEvent,
+    insertedNotifications: eventResult.insertedNotifications,
   };
 }

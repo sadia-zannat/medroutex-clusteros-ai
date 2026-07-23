@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
-import { applyCrisisScenarioToState, getOperationalTwinSummary } from "@/lib/twin-core/state-store";
+import {
+  applyCrisisScenarioToState,
+  getOperationalTwinState,
+  getOperationalTwinSummary,
+} from "@/lib/twin-core/state-store";
 import { deriveMeshStateFromOperationalTwin } from "@/lib/twin-core/compatibility";
+import { dispatchPendingEmailNotifications } from "@/lib/twin-core/email-service";
 
 export async function POST() {
   try {
     // Apply crisis to Operational Twin (canonical source)
-    const operationalTwinState = applyCrisisScenarioToState();
+    applyCrisisScenarioToState();
+    await dispatchPendingEmailNotifications();
+    const operationalTwinState = getOperationalTwinState();
     const operationalTwinSummary = getOperationalTwinSummary();
 
     // Derive legacy MeshState from Operational Twin for dashboard compatibility

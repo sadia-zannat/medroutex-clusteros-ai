@@ -1,14 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import type { MeshState, Gpu, ClusterType } from "../lib/medroutex/types";
 import type {
+  HospitalTwinApiResponse,
   OperationalTwinState,
   OperationalTwinSummary,
   TwinApprovalDecision,
   TwinSimulationState,
 } from "../lib/twin-core/types";
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar } from "recharts";
+import { ResponsiveContainer, XAxis, YAxis, Tooltip, BarChart, Bar } from "recharts";
+import NotificationCenter, {
+  type NotificationApiResponse,
+} from "./_components/notification-center";
+import GuardRulerDecisionEngine from "./_components/guard-ruler-decision-engine";
 
 interface RouteRecommendation {
   id: string;
@@ -67,6 +73,7 @@ function isOperationalTwinSummary(value: unknown): value is OperationalTwinSumma
     typeof value.overallStatus === "string" &&
     typeof value.overallHealthScore === "number" &&
     typeof value.entityCount === "number" &&
+    typeof value.lastSynchronizedAt === "string" &&
     typeof value.simulationOnly === "boolean";
 }
 
@@ -87,8 +94,31 @@ function isOperationalTwinState(value: unknown): value is OperationalTwinState {
     typeof value.overallHealthScore === "number" &&
     typeof value.simulationOnly === "boolean" &&
     Array.isArray(value.entities) &&
+    Array.isArray(value.relationships) &&
+    Array.isArray(value.snapshots) &&
     Array.isArray(value.approvalAuditEvents) &&
+    Array.isArray(value.operationalEvents) &&
+    Array.isArray(value.notifications) &&
+    Array.isArray(value.emailDeliveries) &&
+    Array.isArray(value.activeIncidents) &&
+    isRecord(value.oxygenAlertLifecycle) &&
+    isRecord(value.domains) &&
+    isRecord(value.resilienceSummary) &&
+    isRecord(value.latestSynchronization) &&
     hasValidActiveSimulation;
+}
+
+function isHospitalTwinApiResponse(value: unknown): value is HospitalTwinApiResponse {
+  return isRecord(value) &&
+    value.success === true &&
+    isOperationalTwinState(value.data) &&
+    isOperationalTwinSummary(value.summary) &&
+    typeof value.entityCount === "number" &&
+    typeof value.relationshipCount === "number" &&
+    isRecord(value.latestSynchronization) &&
+    isRecord(value.resilienceSummary) &&
+    isRecord(value.auditSummary) &&
+    isRecord(value.metadata);
 }
 
 function isApprovalApiSuccessResponse(value: unknown): value is ApprovalApiSuccessResponse {
@@ -118,6 +148,18 @@ function getApiErrorMessage(value: unknown): string | null {
 function formatGpuLabel(gpuId?: string): string {
   if (gpuId === "gpu-central-7") return "Central GPU-7";
   return gpuId ?? "No target available";
+}
+
+function deterministicWorkloadProgress(
+  workloadId: string,
+  assignedGpuId?: string
+): number {
+  if (!assignedGpuId) return 0;
+  const checksum = [...workloadId].reduce(
+    (total, character) => total + character.charCodeAt(0),
+    0
+  );
+  return 60 + (checksum % 40);
 }
 
 type ApprovalUiState =
@@ -204,9 +246,34 @@ export default function Home() {
   const [operationalTwinSummary, setOperationalTwinSummary] = useState<OperationalTwinSummary | null>(null);
   const [twinLoading, setTwinLoading] = useState(false);
   const [twinError, setTwinError] = useState<string | null>(null);
+  const [hospitalTwin, setHospitalTwin] = useState<HospitalTwinApiResponse | null>(null);
+  const [hospitalTwinLoading, setHospitalTwinLoading] = useState(false);
+  const [hospitalTwinSyncPending, setHospitalTwinSyncPending] = useState(false);
+  const [hospitalTwinError, setHospitalTwinError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingApprovalDecision, setPendingApprovalDecision] = useState<TwinApprovalDecision | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [notificationRefreshNonce, setNotificationRefreshNonce] = useState(0);
+  const [notificationSnapshot, setNotificationSnapshot] =
+    useState<NotificationApiResponse | null>(null);
+  const canonicalTwinMutationEpochRef = useRef(0);
+  const canonicalTwinMutationPendingRef = useRef(false);
+  const operationalTwinRequestSequenceRef = useRef(0);
+  const hospitalTwinRequestSequenceRef = useRef(0);
+
+  const invalidateCanonicalTwinReads = (): void => {
+    operationalTwinRequestSequenceRef.current += 1;
+    hospitalTwinRequestSequenceRef.current += 1;
+    setTwinLoading(false);
+    setHospitalTwinLoading(false);
+  };
+
+  const beginCanonicalTwinMutation = (): number => {
+    const nextEpoch = canonicalTwinMutationEpochRef.current + 1;
+    canonicalTwinMutationEpochRef.current = nextEpoch;
+    invalidateCanonicalTwinReads();
+    return nextEpoch;
+  };
 
   const fetchState = async (showLoading = true) => {
     try {
@@ -246,6 +313,11 @@ export default function Home() {
   };
 
   const fetchOperationalTwin = async () => {
+    const requestEpoch = canonicalTwinMutationEpochRef.current;
+    const requestSequence =
+      operationalTwinRequestSequenceRef.current + 1;
+    operationalTwinRequestSequenceRef.current = requestSequence;
+
     try {
       setTwinLoading(true);
       setTwinError(null);
@@ -259,26 +331,123 @@ export default function Home() {
       ) {
         throw new Error("Operational twin returned an invalid response");
       }
+      if (
+        requestEpoch !== canonicalTwinMutationEpochRef.current ||
+        requestSequence !== operationalTwinRequestSequenceRef.current
+      ) {
+        return;
+      }
       setOperationalTwinState(payload.data);
       setOperationalTwinSummary(payload.summary);
     } catch (err) {
+      if (
+        requestEpoch !== canonicalTwinMutationEpochRef.current ||
+        requestSequence !== operationalTwinRequestSequenceRef.current
+      ) {
+        return;
+      }
       setTwinError(err instanceof Error ? err.message : "Failed to load operational twin");
       console.error("Failed to fetch operational twin:", err);
     } finally {
-      setTwinLoading(false);
+      if (requestSequence === operationalTwinRequestSequenceRef.current) {
+        setTwinLoading(false);
+      }
+    }
+  };
+
+  const fetchHospitalTwin = async () => {
+    const requestEpoch = canonicalTwinMutationEpochRef.current;
+    const requestSequence = hospitalTwinRequestSequenceRef.current + 1;
+    hospitalTwinRequestSequenceRef.current = requestSequence;
+
+    try {
+      setHospitalTwinLoading(true);
+      setHospitalTwinError(null);
+      const response = await fetch("/api/hospital-twin/state");
+      if (!response.ok) throw new Error("Failed to fetch hospital twin");
+      const payload = await parseJsonSafely(response);
+      if (!isHospitalTwinApiResponse(payload)) {
+        throw new Error("Hospital twin returned an invalid response");
+      }
+      if (
+        requestEpoch !== canonicalTwinMutationEpochRef.current ||
+        requestSequence !== hospitalTwinRequestSequenceRef.current
+      ) {
+        return;
+      }
+      setHospitalTwin(payload);
+    } catch (err) {
+      if (
+        requestEpoch !== canonicalTwinMutationEpochRef.current ||
+        requestSequence !== hospitalTwinRequestSequenceRef.current
+      ) {
+        return;
+      }
+      setHospitalTwinError(err instanceof Error ? err.message : "Failed to load hospital twin");
+      console.error("Failed to fetch hospital twin:", err);
+    } finally {
+      if (requestSequence === hospitalTwinRequestSequenceRef.current) {
+        setHospitalTwinLoading(false);
+      }
+    }
+  };
+
+  const handleHospitalTwinSync = async () => {
+    if (
+      hospitalTwinSyncPending ||
+      canonicalTwinMutationPendingRef.current
+    ) {
+      return;
+    }
+
+    canonicalTwinMutationPendingRef.current = true;
+    const mutationEpoch = beginCanonicalTwinMutation();
+    setHospitalTwinSyncPending(true);
+    setHospitalTwinError(null);
+    try {
+      const response = await fetch("/api/hospital-twin/sync", { method: "POST" });
+      const payload = await parseJsonSafely(response);
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(payload) ?? "Unable to synchronize hospital twin");
+      }
+      if (!isHospitalTwinApiResponse(payload)) {
+        throw new Error("Hospital twin synchronization returned an invalid response");
+      }
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
+      invalidateCanonicalTwinReads();
+      setHospitalTwin(payload);
+      setOperationalTwinState(payload.data);
+      setOperationalTwinSummary(payload.summary);
+      setNotificationRefreshNonce((current) => current + 1);
+      await fetchState(false);
+    } catch (err) {
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
+      setHospitalTwinError(
+        err instanceof Error ? err.message : "Unable to synchronize hospital twin"
+      );
+    } finally {
+      canonicalTwinMutationPendingRef.current = false;
+      setHospitalTwinSyncPending(false);
     }
   };
 
   const handleReset = async () => {
+    if (canonicalTwinMutationPendingRef.current) return;
+    canonicalTwinMutationPendingRef.current = true;
+    const mutationEpoch = beginCanonicalTwinMutation();
     try {
       setActionError(null);
       setApprovalError(null);
+      setHospitalTwinError(null);
       setPendingApprovalDecision(null);
       setRecommendations([]);
       const response = await fetch("/api/demo/reset", { method: "POST" });
       if (!response.ok) throw new Error("Failed to reset");
       const data = await response.json();
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
+      invalidateCanonicalTwinReads();
       setMeshState(data);
+      setNotificationRefreshNonce((current) => current + 1);
       // Update Operational Twin state from response
       if (data.operationalTwinState) {
         setOperationalTwinState(data.operationalTwinState);
@@ -290,20 +459,31 @@ export default function Home() {
       }
       await fetchRecommendations();
       await fetchDigitalTwin();
+      await fetchHospitalTwin();
     } catch (err) {
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
       setActionError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      canonicalTwinMutationPendingRef.current = false;
     }
   };
 
   const handleRunScenario = async () => {
+    if (canonicalTwinMutationPendingRef.current) return;
+    canonicalTwinMutationPendingRef.current = true;
+    const mutationEpoch = beginCanonicalTwinMutation();
     try {
       setActionError(null);
       setApprovalError(null);
+      setHospitalTwinError(null);
       setPendingApprovalDecision(null);
       const response = await fetch("/api/demo/run", { method: "POST" });
       if (!response.ok) throw new Error("Failed to run scenario");
       const data = await response.json();
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
+      invalidateCanonicalTwinReads();
       setMeshState(data);
+      setNotificationRefreshNonce((current) => current + 1);
       // Update Operational Twin state from response
       if (data.operationalTwinState) {
         setOperationalTwinState(data.operationalTwinState);
@@ -315,8 +495,12 @@ export default function Home() {
       }
       await fetchRecommendations();
       await fetchDigitalTwin();
+      await fetchHospitalTwin();
     } catch (err) {
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
       setActionError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      canonicalTwinMutationPendingRef.current = false;
     }
   };
 
@@ -324,7 +508,12 @@ export default function Home() {
     decision: TwinApprovalDecision,
     recommendationId: string
   ) => {
-    if (pendingApprovalDecision !== null) return;
+    if (
+      pendingApprovalDecision !== null ||
+      canonicalTwinMutationPendingRef.current
+    ) {
+      return;
+    }
 
     const activeSimulation = operationalTwinState?.activeSimulation;
     if (!isLoggedIn || !operatorName.trim() || !operatorRole.trim()) {
@@ -339,6 +528,8 @@ export default function Home() {
       return;
     }
 
+    canonicalTwinMutationPendingRef.current = true;
+    const mutationEpoch = beginCanonicalTwinMutation();
     setPendingApprovalDecision(decision);
     setApprovalError(null);
 
@@ -359,30 +550,47 @@ export default function Home() {
 
       if (!response.ok) {
         const message = getApiErrorMessage(payload) ?? "Unable to record the approval decision.";
+        if (response.status === 409) {
+          setNotificationRefreshNonce((current) => current + 1);
+        }
         throw new Error(response.status === 409 ? `Approval conflict: ${message}` : message);
       }
 
       if (!isApprovalApiSuccessResponse(payload)) {
         throw new Error("Approval API returned an invalid response.");
       }
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
+      invalidateCanonicalTwinReads();
 
       setOperationalTwinState(payload.data);
       setOperationalTwinSummary(payload.summary);
+      setNotificationRefreshNonce((current) => current + 1);
+      await fetchHospitalTwin();
     } catch (err) {
+      if (mutationEpoch !== canonicalTwinMutationEpochRef.current) return;
       const message =
         err instanceof Error ? err.message : "Unable to record the approval decision.";
-      await Promise.allSettled([fetchState(false), fetchOperationalTwin()]);
+      await Promise.allSettled([
+        fetchState(false),
+        fetchOperationalTwin(),
+        fetchHospitalTwin(),
+      ]);
       setApprovalError(message);
     } finally {
+      canonicalTwinMutationPendingRef.current = false;
       setPendingApprovalDecision(null);
     }
   };
 
   useEffect(() => {
-    fetchState();
-    fetchRecommendations();
-    fetchDigitalTwin();
-    fetchOperationalTwin();
+    const timeout = window.setTimeout(() => {
+      void fetchState();
+      void fetchRecommendations();
+      void fetchDigitalTwin();
+      void fetchOperationalTwin();
+      void fetchHospitalTwin();
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, []);
 
   const formatNumber = (value: number, decimals: number = 1): string => {
@@ -459,6 +667,33 @@ export default function Home() {
   const twinRiskScore = operationalTwinSummary?.overallRiskScore ?? operationalTwinState?.overallRiskScore;
   const twinEntityCount = operationalTwinSummary?.entityCount ?? operationalTwinState?.entities.length;
   const twinVersion = operationalTwinSummary?.version ?? operationalTwinState?.version;
+  const hospitalResilience = hospitalTwin?.resilienceSummary;
+  const hospitalDataFreshness = hospitalResilience
+    ? hospitalResilience.staleSourceCount === 0 && hospitalResilience.offlineSourceCount === 0
+      ? "Current"
+      : `${hospitalResilience.staleSourceCount} stale / ${hospitalResilience.offlineSourceCount} offline`
+    : "Unavailable";
+  const latestPriorityNotification =
+    operationalTwinState === null
+      ? notificationSnapshot?.latestActivePriorityNotification ?? null
+      : [...operationalTwinState.notifications]
+          .reverse()
+          .find(
+            (notification) =>
+              notification.lifecycleStatus === "active" &&
+              (notification.severity === "critical" ||
+                notification.severity === "action-required")
+          ) ?? null;
+  const activeOxygenIncident =
+    notificationSnapshot?.activeIncidents.find(
+      (incident) => incident.domain === "oxygen"
+    ) ?? null;
+  const emailChannelLabel = notificationSnapshot
+    ? notificationSnapshot.emailChannelStatus
+        .split("-")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ")
+    : "Checking";
 
   return (
     <main className="min-h-screen bg-slate-950 text-white flex">
@@ -502,28 +737,39 @@ export default function Home() {
               <a href="#jobs" className="hover:text-cyan-400 transition-colors">Jobs</a>
               <a href="#analytics" className="hover:text-cyan-400 transition-colors">Analytics</a>
               <a href="#admin" className="hover:text-cyan-400 transition-colors">Admin</a>
+              <Link href="/history" className="hover:text-cyan-400 transition-colors">
+                History
+              </Link>
             </nav>
-            {isLoggedIn ? (
-              <div className="flex items-center gap-3">
-                <div className="hidden sm:flex flex-col items-end">
-                  <span className="text-sm font-medium text-slate-300">{operatorName}</span>
-                  <span className="text-xs text-slate-500">{operatorRole}</span>
+            <div className="flex items-center gap-3">
+              <NotificationCenter
+                operatorName={operatorName}
+                operatorRole={operatorRole}
+                refreshNonce={notificationRefreshNonce}
+                onSnapshot={setNotificationSnapshot}
+              />
+              {isLoggedIn ? (
+                <div className="flex items-center gap-3">
+                  <div className="hidden sm:flex flex-col items-end">
+                    <span className="text-sm font-medium text-slate-300">{operatorName}</span>
+                    <span className="text-xs text-slate-500">{operatorRole}</span>
+                  </div>
+                  <button
+                    onClick={handleLogout}
+                    className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition-colors"
+                  >
+                    Logout
+                  </button>
                 </div>
+              ) : (
                 <button
-                  onClick={handleLogout}
-                  className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300 hover:bg-red-500/20 transition-colors"
+                  onClick={() => setShowLoginModal(true)}
+                  className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors"
                 >
-                  Logout
+                  Connect
                 </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setShowLoginModal(true)}
-                className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors"
-              >
-                Connect
-              </button>
-            )}
+              )}
+            </div>
           </div>
         </header>
 
@@ -679,6 +925,166 @@ export default function Home() {
                 <span className="text-purple-300">Digital Twin</span>
               </div>
             </div>
+
+            {/* Operational Hospital Twin */}
+            <div className="rounded-xl border border-teal-500/20 bg-teal-500/5 p-4 backdrop-blur-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-teal-300">Operational Hospital Twin</h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Infrastructure Decision Support Only · Not a Diagnosis System
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    href="/history"
+                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-teal-500/30 hover:bg-teal-500/10 hover:text-teal-200"
+                  >
+                    View History
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => void handleHospitalTwinSync()}
+                    disabled={hospitalTwinSyncPending}
+                    className="rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2 text-xs font-medium text-teal-300 transition-colors hover:bg-teal-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {hospitalTwinSyncPending ? "Synchronizing..." : "Sync Hospital Twin"}
+                  </button>
+                </div>
+              </div>
+
+              {hospitalTwinError ? (
+                <p className="mb-3 text-xs text-red-400">{hospitalTwinError}</p>
+              ) : null}
+
+              {hospitalTwinLoading && !hospitalTwin ? (
+                <p className="text-xs text-slate-400">Loading hospital twin...</p>
+              ) : hospitalTwin && hospitalResilience ? (
+                <>
+                  <div className="mb-4 grid gap-3 rounded-lg border border-white/10 bg-slate-950/30 p-3 text-xs sm:grid-cols-3">
+                    <div>
+                      <p className="text-slate-500">Notification Status</p>
+                      <p className="mt-1 font-semibold text-slate-200">
+                        {notificationSnapshot
+                          ? `${notificationSnapshot.unreadCount} unread`
+                          : "Checking"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Email Channel</p>
+                      <p
+                        className={`mt-1 font-semibold ${
+                          notificationSnapshot?.emailChannelStatus === "failed"
+                            ? "text-red-300"
+                            : notificationSnapshot?.emailChannelStatus === "configured"
+                              ? "text-emerald-300"
+                              : "text-amber-300"
+                        }`}
+                      >
+                        {emailChannelLabel}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Active Oxygen Incident</p>
+                      <p className={`mt-1 font-semibold ${
+                        activeOxygenIncident
+                          ? "text-red-300"
+                          : "text-emerald-300"
+                      }`}>
+                        {activeOxygenIncident
+                          ? `${activeOxygenIncident.title} · ${activeOxygenIncident.severity}`
+                          : "None"}
+                      </p>
+                    </div>
+                    <div className="sm:col-span-3">
+                      <p className="text-slate-500">Latest Critical / Action Required</p>
+                      <p className="mt-1 font-semibold text-slate-200">
+                        {latestPriorityNotification
+                          ? latestPriorityNotification.title
+                          : "No active priority notification"}
+                      </p>
+                      {latestPriorityNotification ? (
+                        <p className="mt-1 text-slate-400">
+                          {latestPriorityNotification.reason}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+                    <div>
+                      <p className="text-slate-500">Hospital Resilience Score</p>
+                      <p className="text-lg font-semibold text-teal-300">
+                        {hospitalResilience.resilienceScore}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Compute</p>
+                      <p className="font-semibold text-cyan-400">
+                        {hospitalResilience.computeScore}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">ICU</p>
+                      <p className="font-semibold text-emerald-400">
+                        {hospitalResilience.icuContinuityScore}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Oxygen</p>
+                      <p className="font-semibold text-emerald-400">
+                        {hospitalResilience.oxygenContinuityScore}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Power</p>
+                      <p className="font-semibold text-emerald-400">
+                        {hospitalResilience.powerContinuityScore}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Network</p>
+                      <p className="font-semibold text-emerald-400">
+                        {hospitalResilience.networkContinuityScore}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Data Freshness</p>
+                      <p className="font-semibold text-slate-300">{hospitalDataFreshness}</p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Last Synchronized</p>
+                      <time
+                        dateTime={hospitalTwin.summary.lastSynchronizedAt}
+                        className="font-semibold text-slate-300"
+                      >
+                        {hospitalTwin.summary.lastSynchronizedAt}
+                      </time>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Twin Entities</p>
+                      <p className="font-semibold text-cyan-400">{hospitalTwin.entityCount}</p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Relationships</p>
+                      <p className="font-semibold text-cyan-400">
+                        {hospitalTwin.relationshipCount}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-4 border-t border-white/10 pt-3 text-xs text-slate-400">
+                    <p>GPU source: Synthetic GPU Telemetry</p>
+                    <p>ICU/Oxygen/Power/Network source: Emulated Hospital Telemetry</p>
+                    <p className="mt-1 text-amber-300">EMULATED HOSPITAL TELEMETRY</p>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-slate-400">No hospital twin data available</p>
+              )}
+            </div>
+
+            <GuardRulerDecisionEngine
+              refreshNonce={notificationRefreshNonce}
+            />
 
             {/* Safety Strip */}
             <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 flex flex-wrap gap-4 text-sm">
@@ -903,7 +1309,9 @@ export default function Home() {
           </div>
           <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
             <p className="text-sm text-slate-400">Completed Today</p>
-            <p className="text-2xl font-bold text-emerald-400">{Math.floor(Math.random() * 15) + 5}</p>
+            <p className="text-2xl font-bold text-emerald-400">
+              {meshState.scenario === "medroutex-stroke-crisis" ? 12 : 8}
+            </p>
           </div>
         </div>
         <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
@@ -920,7 +1328,12 @@ export default function Home() {
                 </tr>
               </thead>
               <tbody>
-                {meshState.workloads.slice(0, 8).map((workload) => (
+                {meshState.workloads.slice(0, 8).map((workload) => {
+                  const progress = deterministicWorkloadProgress(
+                    workload.id,
+                    workload.assignedGpuId
+                  );
+                  return (
                   <tr key={workload.id} className="border-b border-white/5 last:border-0">
                     <td className="py-3 px-4 text-slate-300 font-medium">{workload.name}</td>
                     <td className="py-3 px-4">
@@ -944,16 +1357,17 @@ export default function Home() {
                         <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
                           <div 
                             className="h-full bg-gradient-to-r from-cyan-500 to-blue-500"
-                            style={{ width: `${workload.assignedGpuId ? Math.floor(Math.random() * 40) + 60 : 0}%` }}
+                            style={{ width: `${progress}%` }}
                           ></div>
                         </div>
                         <span className="text-xs text-slate-400 w-10">
-                          {workload.assignedGpuId ? `${Math.floor(Math.random() * 40) + 60}%` : "0%"}
+                          {progress}%
                         </span>
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1245,16 +1659,16 @@ export default function Home() {
                     Radiology Operator
                   </button>
                   <button
-                    onClick={() => handleLogin("Admin User", "Cluster Admin")}
+                    onClick={() => handleLogin("Admin User", "Hospital Administrator")}
                     className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:border-purple-500/50 hover:bg-purple-500/10 transition-colors"
                   >
-                    Cluster Admin
+                    Hospital Administrator
                   </button>
                   <button
-                    onClick={() => handleLogin("Safety Officer", "Safety Reviewer")}
+                    onClick={() => handleLogin("Safety Officer", "Security/Privacy Officer")}
                     className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:border-amber-500/50 hover:bg-amber-500/10 transition-colors"
                   >
-                    Safety Reviewer
+                    Security/Privacy Officer
                   </button>
                 </div>
               </div>

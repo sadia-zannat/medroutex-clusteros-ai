@@ -1,18 +1,31 @@
 import { NextResponse } from "next/server";
-import type { TwinApprovalDecision } from "@/lib/twin-core/types";
+import type {
+  OperationalRole,
+  TwinApprovalDecision,
+} from "@/lib/twin-core/types";
 import {
   ApprovalDecisionError,
   applyApprovalDecision,
+  getOperationalTwinState,
   getOperationalTwinSummary,
   type ApprovalDecisionInput,
 } from "@/lib/twin-core/state-store";
+import { dispatchPendingEmailNotifications } from "@/lib/twin-core/email-service";
 
 interface ApprovalRequestBody {
   decision: TwinApprovalDecision;
   operatorName: string;
-  operatorRole: string;
+  operatorRole: OperationalRole;
   recommendationId: string;
 }
+
+const OPERATIONAL_ROLES: readonly OperationalRole[] = [
+  "Radiology Operator",
+  "Hospital Administrator",
+  "Infrastructure Engineer",
+  "ICU Operations",
+  "Security/Privacy Officer",
+];
 
 interface ApprovalErrorResponse {
   success: false;
@@ -34,6 +47,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isOperationalRole(value: unknown): value is OperationalRole {
+  return (
+    typeof value === "string" &&
+    OPERATIONAL_ROLES.some((role) => role === value)
+  );
+}
+
 function parseApprovalRequest(value: unknown): ApprovalDecisionInput | null {
   if (!isRecord(value)) return null;
 
@@ -48,13 +68,13 @@ function parseApprovalRequest(value: unknown): ApprovalDecisionInput | null {
   const { decision, operatorName, operatorRole, recommendationId } = value;
   if (decision !== "approve" && decision !== "reject") return null;
   if (typeof operatorName !== "string" || operatorName.trim().length === 0) return null;
-  if (typeof operatorRole !== "string" || operatorRole.trim().length === 0) return null;
+  if (!isOperationalRole(operatorRole)) return null;
   if (typeof recommendationId !== "string" || recommendationId.trim().length === 0) return null;
 
   return {
     decision,
     operatorName: operatorName.trim(),
-    operatorRole: operatorRole.trim(),
+    operatorRole,
     recommendationId: recommendationId.trim(),
   };
 }
@@ -101,12 +121,14 @@ export async function POST(request: Request) {
 
   try {
     const result = applyApprovalDecision(input);
+    await dispatchPendingEmailNotifications();
+    const updatedState = getOperationalTwinState();
     const summary = getOperationalTwinSummary();
 
     return NextResponse.json({
       success: true,
       outcome: result.outcome,
-      data: result.state,
+      data: updatedState,
       summary,
       approval: result.approval,
       auditEvent: result.auditEvent,
