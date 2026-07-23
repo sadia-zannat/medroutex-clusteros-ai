@@ -20,7 +20,8 @@ import {
   type TwinApprovalRecord,
   type ScenarioState,
 } from "./types";
-import { createInitialOperationalTwinState, applyCrisisScenario } from "./seed";
+import { createInitialOperationalTwinState, applyCrisisScenario, INITIAL_SCENARIO_RUNTIME } from "./seed";
+import { resetScenarioRuntime } from "./scenario-transitions";
 import { getScenarioCatalog } from "./scenario-catalog";
 import {
   ExistingGpuTelemetryAdapter,
@@ -336,7 +337,8 @@ function ensureOperationalCollections(
     Array.isArray(runtimeState.emailDeliveryReservations) &&
     Array.isArray(runtimeState.activeIncidents) &&
     runtimeState.oxygenAlertLifecycle !== undefined &&
-    Array.isArray(runtimeState.latestSynchronization?.failedProviders);
+    Array.isArray(runtimeState.latestSynchronization?.failedProviders) &&
+    runtimeState.scenarioRuntime !== undefined;
 
   const stateWithCollections = hasAllCollections
     ? state
@@ -363,6 +365,7 @@ function ensureOperationalCollections(
           lastEvaluatedAt: null,
           lastEvaluationFingerprint: null,
         },
+        scenarioRuntime: INITIAL_SCENARIO_RUNTIME,
       };
 
   const normalizedState =
@@ -433,11 +436,12 @@ export function getOperationalTwinState(): OperationalTwinState {
 /**
  * Reset the operational twin state to a fresh initial state
  * Replaces the entire state with a new initial state
+ * Also clears scenario runtime state
  */
 export function resetOperationalTwinState(): OperationalTwinState {
-  return setOperationalTwinState(
-    ensureOperationalCollections(createInitialOperationalTwinState())
-  );
+  const initialState = ensureOperationalCollections(createInitialOperationalTwinState());
+  const stateWithResetScenario = resetScenarioRuntime(initialState);
+  return setOperationalTwinState(stateWithResetScenario);
 }
 
 /**
@@ -639,8 +643,8 @@ export function getOperationalTwinSummary(): OperationalTwinSummary {
 }
 
 /**
- * Get the current scenario state (Phase 1: read-only).
- * This extends the canonical singleton with scenario catalog inspection.
+ * Get the current scenario state (Phase 2: execution implemented).
+ * This extends the canonical singleton with scenario catalog inspection and runtime state.
  */
 export function getScenarioState(): ScenarioState {
   const state = getOperationalTwinState();
@@ -655,9 +659,9 @@ export function getScenarioState(): ScenarioState {
     canActivateScenario: activeSimulation === null,
     lastScenarioTransitionAt: activeSimulation?.startedAt ?? null,
     metadata: {
-      phase: 1,
-      readOnly: true,
-      mutationNotImplemented: true,
+      phase: 2,
+      readOnly: false,
+      mutationImplemented: true,
     },
   };
 }

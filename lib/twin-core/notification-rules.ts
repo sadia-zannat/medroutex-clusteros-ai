@@ -70,6 +70,10 @@ const NEVER_VISIBLE_EVENT_TYPES = new Set<OperationalEvent["eventType"]>([
   "route-selected",
   "twin-synchronized",
   "system-event",
+  "icu-capacity-critical",
+  "icu-device-availability-critical",
+  "icu-dependency-assessment",
+  "icu-recommendation-prepared",
 ]);
 
 const ALWAYS_EMAIL_EVENT_TYPES = new Set<OperationalEvent["eventType"]>([

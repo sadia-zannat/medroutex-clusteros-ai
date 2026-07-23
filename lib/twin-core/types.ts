@@ -301,6 +301,8 @@ export type OperationalEventType =
   | "telemetry-offline"
   | "icu-capacity-critical"
   | "icu-device-availability-critical"
+  | "icu-dependency-assessment"
+  | "icu-recommendation-prepared"
   | "oxygen-warning"
   | "oxygen-critical"
   | "oxygen-action-required"
@@ -955,6 +957,7 @@ export interface OperationalTwinState {
   overallRiskScore: number;
   simulationOnly: boolean;
   clinicalDisclaimer: string;
+  scenarioRuntime: ScenarioRuntimeState;
 }
 
 export interface OperationalTwinSummary {
@@ -1067,8 +1070,119 @@ export interface ScenarioState {
   canActivateScenario: boolean;
   lastScenarioTransitionAt: string | null;
   metadata: {
-    phase: 1;
-    readOnly: true;
-    mutationNotImplemented: true;
+    phase: 2;
+    readOnly: false;
+    mutationImplemented: true;
   };
+}
+
+/**
+ * Phase 2A: Scenario Runtime State
+ *
+ * Tracks the execution state of active scenarios within the canonical singleton.
+ * No second globalThis key - this is part of the existing OperationalTwinState.
+ */
+export interface ScenarioRuntimeState {
+  activeScenarioId: string | null;
+  scenarioStatus: TwinScenarioStatus | null;
+  startedAt: string | null;
+  lastTransitionAt: string | null;
+  stateVersionStarted: number | null;
+  affectedDomains: readonly ScenarioDomain[];
+  severity: ScenarioSeverity | null;
+  activeIncidentIds: readonly string[];
+  rootCauseIds: readonly string[];
+  transitionKey: string | null;
+  executionCount: number;
+  recoveryStatus: "not-recovering" | "recovering" | "recovered" | "failed";
+  humanApprovalRequired: boolean;
+  physicalExecutionPerformed: false;
+  metadata: {
+    phase: 2;
+    deterministic: true;
+    patientData: false;
+    diagnosis: false;
+    actuatorExecution: false;
+  };
+}
+
+/**
+ * Phase 2A: Scenario Execution Result
+ *
+ * Returned by the scenario execution engine after applying a scenario transition.
+ */
+export interface ScenarioExecutionResult {
+  success: boolean;
+  outcome: "applied" | "idempotent" | "not-implemented" | "invalid-request";
+  scenarioId: string;
+  scenarioName: string;
+  transitionKey: string;
+  stateVersion: number;
+  previousStateVersion: number;
+  runtimeState: ScenarioRuntimeState;
+  fullState?: OperationalTwinState;
+  hospitalHealthScore: number;
+  hospitalResilienceScore: number;
+  domainScores: {
+    compute: number;
+    icu: number;
+    oxygen: number;
+    power: number;
+    network: number;
+  };
+  eventsCreated: number;
+  notificationsCreated: number;
+  snapshotCreated: boolean;
+  humanApprovalRequired: boolean;
+  physicalExecutionPerformed: false;
+  error: string | null;
+  metadata: {
+    phase: 2;
+    deterministic: true;
+    sourceLabel: "MedRouteX Hospital Twin";
+  };
+}
+
+/**
+ * Phase 2A: ICU Continuity Assessment
+ *
+ * Typed assessment for ICU domain continuity during capacity stress scenarios.
+ */
+export interface IcuContinuityAssessment {
+  totalBeds: number;
+  occupiedBeds: number;
+  occupancyPercentage: number;
+  criticalBedDemand: number;
+  ventilatorsAvailable: number;
+  ventilatorsInUse: number;
+  devicesOffline: number;
+  oxygenDemandLitersPerMinute: number;
+  continuityScore: number;
+  status: HospitalOperationalStatus;
+  affectedDomains: readonly ScenarioDomain[];
+  affectedDependencies: readonly string[];
+  evidence: readonly string[];
+  confidence: number;
+  sourceLabel: "Emulated Hospital Telemetry";
+  emulated: true;
+}
+
+/**
+ * Phase 2A: ICU Operational Recommendation
+ *
+ * Deterministic infrastructure response recommendation for ICU capacity stress.
+ * Does not recommend medical treatment.
+ */
+export interface IcuOperationalRecommendation {
+  recommendationId: string;
+  scenarioId: string;
+  priority: "preserve-capacity" | "prioritize-resources" | "delay-workloads" | "review-maintenance" | "prepare-support";
+  title: string;
+  description: string;
+  affectedDomains: readonly ScenarioDomain[];
+  requiresHumanReview: boolean;
+  infrastructureActions: readonly string[];
+  medicalDisclaimer: string;
+  sourceLabel: "MedRouteX Hospital Twin";
+  emulated: true;
 }

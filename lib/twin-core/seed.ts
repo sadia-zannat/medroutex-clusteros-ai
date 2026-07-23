@@ -7,6 +7,7 @@ import {
   type TwinRelationship,
   type TwinSimulationState,
   type TwinTelemetryPoint,
+  type ScenarioRuntimeState,
 } from "./types";
 import {
   appendHospitalSnapshot,
@@ -20,6 +21,30 @@ import {
 import { createBaselineResetEvent } from "./operational-events";
 
 const BASELINE_TIMESTAMP = "2024-01-15T10:30:00.000Z";
+
+export const INITIAL_SCENARIO_RUNTIME: ScenarioRuntimeState = {
+  activeScenarioId: null,
+  scenarioStatus: null,
+  startedAt: null,
+  lastTransitionAt: null,
+  stateVersionStarted: null,
+  affectedDomains: [],
+  severity: null,
+  activeIncidentIds: [],
+  rootCauseIds: [],
+  transitionKey: null,
+  executionCount: 0,
+  recoveryStatus: "not-recovering",
+  humanApprovalRequired: false,
+  physicalExecutionPerformed: false,
+  metadata: {
+    phase: 2,
+    deterministic: true,
+    patientData: false,
+    diagnosis: false,
+    actuatorExecution: false,
+  },
+};
 
 function createEntity(input: {
   id: string;
@@ -680,6 +705,7 @@ function createInitialStateWithoutSnapshot(): OperationalTwinState {
     overallRiskScore: 12,
     simulationOnly: true,
     clinicalDisclaimer: INFRASTRUCTURE_CLINICAL_DISCLAIMER,
+    scenarioRuntime: INITIAL_SCENARIO_RUNTIME,
   };
 
   const providers = [
@@ -877,6 +903,29 @@ export function applyCrisisScenario(
     entities,
     latestTelemetry: mergeTelemetry(state.latestTelemetry, crisisTelemetry),
     activeSimulation,
+    scenarioRuntime: {
+      activeScenarioId: "medroutex-stroke-crisis",
+      scenarioStatus: "awaiting-approval",
+      startedAt: crisisTimestamp,
+      lastTransitionAt: crisisTimestamp,
+      stateVersionStarted: version,
+      affectedDomains: ["compute", "power", "network"],
+      severity: "critical",
+      activeIncidentIds: [],
+      rootCauseIds: ["compute-local-gpu-02", "compute-local-gpu-03"],
+      transitionKey: `stroke-crisis-${crisisTimestamp}`,
+      executionCount: 1,
+      recoveryStatus: "not-recovering",
+      humanApprovalRequired: true,
+      physicalExecutionPerformed: false,
+      metadata: {
+        phase: 2,
+        deterministic: true,
+        patientData: false,
+        diagnosis: false,
+        actuatorExecution: false,
+      },
+    },
   };
   const domains = deriveHospitalDomains(stateWithScenario);
   const resilienceSummary = calculateHospitalResilience(
