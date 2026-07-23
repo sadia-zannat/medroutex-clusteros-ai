@@ -255,6 +255,24 @@ export interface OperationalTwinState {
 }
 
 /**
+ * Compact operational twin summary returned alongside canonical state
+ */
+export interface OperationalTwinSummary {
+  twinId: string;
+  hospitalId: string;
+  hospitalName: string;
+  version: number;
+  overallStatus: TwinOperationalStatus;
+  overallHealthScore: number;
+  overallRiskScore: number;
+  entityCount: number;
+  relationshipCount: number;
+  latestTelemetryCount: number;
+  lastSynchronizedAt: string;
+  simulationOnly: boolean;
+}
+
+/**
  * Clinical disclaimer for infrastructure decision-support systems
  */
 export const INFRASTRUCTURE_CLINICAL_DISCLAIMER: string =

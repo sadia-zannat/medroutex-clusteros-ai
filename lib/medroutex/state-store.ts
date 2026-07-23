@@ -1,23 +1,35 @@
 import type { MeshState } from "./types";
-import { createInitialMeshState, runScenario } from "./simulator";
+import {
+  applyCrisisScenarioToState,
+  getOperationalTwinState,
+  resetOperationalTwinState,
+} from "../twin-core/state-store";
+import { deriveMeshStateFromOperationalTwin } from "../twin-core/compatibility";
 
-let currentState: MeshState | null = null;
+function deriveCurrentMeshState(): MeshState {
+  const operationalTwinState = getOperationalTwinState();
+  const scenario = operationalTwinState.overallStatus === "critical"
+    ? "medroutex-stroke-crisis"
+    : "normal_day";
+
+  return deriveMeshStateFromOperationalTwin(operationalTwinState, scenario);
+}
 
 export function getCurrentState(): MeshState {
-  if (!currentState) {
-    currentState = createInitialMeshState();
-  }
-  return currentState;
+  return deriveCurrentMeshState();
 }
 
 export function resetCurrentState(): MeshState {
-  currentState = createInitialMeshState();
-  return currentState;
+  const operationalTwinState = resetOperationalTwinState();
+  return deriveMeshStateFromOperationalTwin(operationalTwinState, "normal_day");
 }
 
 export function runCurrentScenario(): MeshState {
-  currentState = runScenario(currentState || undefined);
-  return currentState;
+  const operationalTwinState = applyCrisisScenarioToState();
+  return deriveMeshStateFromOperationalTwin(
+    operationalTwinState,
+    "medroutex-stroke-crisis"
+  );
 }
 
 export function getMetrics(): {
@@ -30,7 +42,7 @@ export function getMetrics(): {
   estimatedSaving: number;
   scenario: string;
 } {
-  const state = getCurrentState();
+  const state = deriveCurrentMeshState();
   return {
     totalGpus: state.totalGpus,
     activeWorkloads: state.activeWorkloads,

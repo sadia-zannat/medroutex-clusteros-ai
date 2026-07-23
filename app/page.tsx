@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 import type { MeshState, Gpu, ClusterType } from "../lib/medroutex/types";
-import type { OperationalTwinState } from "../lib/twin-core/types";
+import type {
+  OperationalTwinState,
+  OperationalTwinSummary,
+  TwinApprovalDecision,
+  TwinSimulationState,
+} from "../lib/twin-core/types";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar } from "recharts";
 
 interface RouteRecommendation {
@@ -40,26 +45,172 @@ interface DigitalTwinResult {
   safetySummary: string;
 }
 
+interface ApprovalApiSuccessResponse {
+  success: true;
+  outcome: "applied" | "idempotent";
+  data: OperationalTwinState;
+  summary: OperationalTwinSummary;
+  metadata: {
+    simulationOnly: true;
+    migrationExecuted: false;
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOperationalTwinSummary(value: unknown): value is OperationalTwinSummary {
+  return isRecord(value) &&
+    typeof value.twinId === "string" &&
+    typeof value.version === "number" &&
+    typeof value.overallStatus === "string" &&
+    typeof value.overallHealthScore === "number" &&
+    typeof value.entityCount === "number" &&
+    typeof value.simulationOnly === "boolean";
+}
+
+function isOperationalTwinState(value: unknown): value is OperationalTwinState {
+  if (!isRecord(value)) return false;
+
+  const activeSimulation = value.activeSimulation;
+  const hasValidActiveSimulation = activeSimulation === null || (
+    isRecord(activeSimulation) &&
+    typeof activeSimulation.status === "string" &&
+    typeof activeSimulation.recommendationId === "string" &&
+    typeof activeSimulation.recommendedTargetGpuId === "string" &&
+    typeof activeSimulation.approvalSatisfied === "boolean"
+  );
+
+  return typeof value.twinId === "string" &&
+    typeof value.version === "number" &&
+    typeof value.overallHealthScore === "number" &&
+    typeof value.simulationOnly === "boolean" &&
+    Array.isArray(value.entities) &&
+    Array.isArray(value.approvalAuditEvents) &&
+    hasValidActiveSimulation;
+}
+
+function isApprovalApiSuccessResponse(value: unknown): value is ApprovalApiSuccessResponse {
+  return isRecord(value) &&
+    value.success === true &&
+    (value.outcome === "applied" || value.outcome === "idempotent") &&
+    isOperationalTwinState(value.data) &&
+    isOperationalTwinSummary(value.summary) &&
+    isRecord(value.metadata) &&
+    value.metadata.simulationOnly === true &&
+    value.metadata.migrationExecuted === false;
+}
+
+async function parseJsonSafely(response: Response): Promise<unknown> {
+  try {
+    return await response.json() as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function getApiErrorMessage(value: unknown): string | null {
+  if (!isRecord(value) || !isRecord(value.error)) return null;
+  return typeof value.error.message === "string" ? value.error.message : null;
+}
+
+function formatGpuLabel(gpuId?: string): string {
+  if (gpuId === "gpu-central-7") return "Central GPU-7";
+  return gpuId ?? "No target available";
+}
+
+type ApprovalUiState =
+  | "not-required"
+  | "required"
+  | "satisfied"
+  | "rejected"
+  | "pending";
+
+interface ApprovalUiCopy {
+  operationalTwin: string;
+  safetyStrip: string;
+  routePlanner: string;
+  queue: string;
+}
+
+const APPROVAL_UI_COPY: Record<ApprovalUiState, ApprovalUiCopy> = {
+  "not-required": {
+    operationalTwin: "Not Required",
+    safetyStrip: "Human Approval Not Required",
+    routePlanner: "Human Approval Not Required",
+    queue: "Human Approval Not Required",
+  },
+  required: {
+    operationalTwin: "Required",
+    safetyStrip: "Human Approval Required",
+    routePlanner: "Human Approval Required",
+    queue: "Human Approval Required",
+  },
+  satisfied: {
+    operationalTwin: "Satisfied",
+    safetyStrip: "Human Approval Satisfied",
+    routePlanner: "Approval Satisfied",
+    queue: "Approval satisfied",
+  },
+  rejected: {
+    operationalTwin: "Rejected",
+    safetyStrip: "Human Approval Rejected",
+    routePlanner: "Decision Rejected",
+    queue: "Decision rejected",
+  },
+  pending: {
+    operationalTwin: "Pending",
+    safetyStrip: "Human Approval Pending",
+    routePlanner: "Approval Pending",
+    queue: "Approval pending",
+  },
+};
+
+function getApprovalUiState(
+  activeSimulation: TwinSimulationState | null
+): ApprovalUiState {
+  if (activeSimulation === null) return "not-required";
+
+  if (activeSimulation.status === "awaiting-approval") return "required";
+  if (
+    activeSimulation.status === "approved" &&
+    activeSimulation.approval?.decision === "approve" &&
+    activeSimulation.approval.satisfied
+  ) {
+    return "satisfied";
+  }
+  if (
+    activeSimulation.status === "rejected" &&
+    activeSimulation.approval?.decision === "reject"
+  ) {
+    return "rejected";
+  }
+
+  return "pending";
+}
+
 export default function Home() {
   const [meshState, setMeshState] = useState<MeshState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recommendations, setRecommendations] = useState<RouteRecommendation[]>([]);
   const [digitalTwin, setDigitalTwin] = useState<DigitalTwinResult | null>(null);
-  const [approvedRecs, setApprovedRecs] = useState<Set<string>>(new Set());
-  const [rejectedRecs, setRejectedRecs] = useState<Set<string>>(new Set());
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [operatorName, setOperatorName] = useState("");
   const [operatorRole, setOperatorRole] = useState("");
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [operationalTwinState, setOperationalTwinState] = useState<OperationalTwinState | null>(null);
+  const [operationalTwinSummary, setOperationalTwinSummary] = useState<OperationalTwinSummary | null>(null);
   const [twinLoading, setTwinLoading] = useState(false);
   const [twinError, setTwinError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pendingApprovalDecision, setPendingApprovalDecision] = useState<TwinApprovalDecision | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
-  const fetchState = async () => {
+  const fetchState = async (showLoading = true) => {
     try {
-      setLoading(true);
+      if (showLoading) setLoading(true);
       const response = await fetch("/api/mesh/state");
       if (!response.ok) throw new Error("Failed to fetch state");
       const data = await response.json();
@@ -68,7 +219,7 @@ export default function Home() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 
@@ -100,8 +251,16 @@ export default function Home() {
       setTwinError(null);
       const response = await fetch("/api/operational-twin/state");
       if (!response.ok) throw new Error("Failed to fetch operational twin");
-      const data = await response.json();
-      setOperationalTwinState(data.data);
+      const payload = await parseJsonSafely(response);
+      if (
+        !isRecord(payload) ||
+        !isOperationalTwinState(payload.data) ||
+        !isOperationalTwinSummary(payload.summary)
+      ) {
+        throw new Error("Operational twin returned an invalid response");
+      }
+      setOperationalTwinState(payload.data);
+      setOperationalTwinSummary(payload.summary);
     } catch (err) {
       setTwinError(err instanceof Error ? err.message : "Failed to load operational twin");
       console.error("Failed to fetch operational twin:", err);
@@ -113,6 +272,9 @@ export default function Home() {
   const handleReset = async () => {
     try {
       setActionError(null);
+      setApprovalError(null);
+      setPendingApprovalDecision(null);
+      setRecommendations([]);
       const response = await fetch("/api/demo/reset", { method: "POST" });
       if (!response.ok) throw new Error("Failed to reset");
       const data = await response.json();
@@ -120,6 +282,9 @@ export default function Home() {
       // Update Operational Twin state from response
       if (data.operationalTwinState) {
         setOperationalTwinState(data.operationalTwinState);
+        if (isOperationalTwinSummary(data.operationalTwinSummary)) {
+          setOperationalTwinSummary(data.operationalTwinSummary);
+        }
       } else {
         await fetchOperationalTwin();
       }
@@ -133,6 +298,8 @@ export default function Home() {
   const handleRunScenario = async () => {
     try {
       setActionError(null);
+      setApprovalError(null);
+      setPendingApprovalDecision(null);
       const response = await fetch("/api/demo/run", { method: "POST" });
       if (!response.ok) throw new Error("Failed to run scenario");
       const data = await response.json();
@@ -140,6 +307,9 @@ export default function Home() {
       // Update Operational Twin state from response
       if (data.operationalTwinState) {
         setOperationalTwinState(data.operationalTwinState);
+        if (isOperationalTwinSummary(data.operationalTwinSummary)) {
+          setOperationalTwinSummary(data.operationalTwinSummary);
+        }
       } else {
         await fetchOperationalTwin();
       }
@@ -147,6 +317,64 @@ export default function Home() {
       await fetchDigitalTwin();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Unknown error");
+    }
+  };
+
+  const handleApprovalDecision = async (
+    decision: TwinApprovalDecision,
+    recommendationId: string
+  ) => {
+    if (pendingApprovalDecision !== null) return;
+
+    const activeSimulation = operationalTwinState?.activeSimulation;
+    if (!isLoggedIn || !operatorName.trim() || !operatorRole.trim()) {
+      setApprovalError("Operator approval permission is required.");
+      return;
+    }
+    if (
+      activeSimulation?.status !== "awaiting-approval" ||
+      activeSimulation.recommendationId !== recommendationId
+    ) {
+      setApprovalError("This recommendation is not currently awaiting approval.");
+      return;
+    }
+
+    setPendingApprovalDecision(decision);
+    setApprovalError(null);
+
+    try {
+      const response = await fetch("/api/operational-twin/approval", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          decision,
+          operatorName,
+          operatorRole,
+          recommendationId,
+        }),
+      });
+      const payload = await parseJsonSafely(response);
+
+      if (!response.ok) {
+        const message = getApiErrorMessage(payload) ?? "Unable to record the approval decision.";
+        throw new Error(response.status === 409 ? `Approval conflict: ${message}` : message);
+      }
+
+      if (!isApprovalApiSuccessResponse(payload)) {
+        throw new Error("Approval API returned an invalid response.");
+      }
+
+      setOperationalTwinState(payload.data);
+      setOperationalTwinSummary(payload.summary);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unable to record the approval decision.";
+      await Promise.allSettled([fetchState(false), fetchOperationalTwin()]);
+      setApprovalError(message);
+    } finally {
+      setPendingApprovalDecision(null);
     }
   };
 
@@ -188,8 +416,6 @@ export default function Home() {
     setIsLoggedIn(false);
     setOperatorName("");
     setOperatorRole("");
-    setApprovedRecs(new Set());
-    setRejectedRecs(new Set());
   };
 
   if (loading) {
@@ -209,7 +435,7 @@ export default function Home() {
         <div className="text-center">
           <p className="text-red-400 mb-4">Error: {error}</p>
           <button
-            onClick={fetchState}
+            onClick={() => void fetchState()}
             className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-500/20 transition-colors"
           >
             Retry
@@ -220,6 +446,19 @@ export default function Home() {
   }
 
   if (!meshState) return null;
+
+  const activeSimulation = operationalTwinState?.activeSimulation ?? null;
+  const approvalUiState = getApprovalUiState(activeSimulation);
+  const approvalUiCopy = APPROVAL_UI_COPY[approvalUiState];
+  const approvalRecommendations = recommendations.filter(
+    (recommendation) => recommendation.requiresHumanApproval === true && recommendation.id.trim().length > 0
+  );
+  const hasApprovalPermission = isLoggedIn && operatorName.trim().length > 0 && operatorRole.trim().length > 0;
+  const twinOverallStatus = operationalTwinSummary?.overallStatus ?? operationalTwinState?.overallStatus;
+  const twinHealthScore = operationalTwinSummary?.overallHealthScore ?? operationalTwinState?.overallHealthScore;
+  const twinRiskScore = operationalTwinSummary?.overallRiskScore ?? operationalTwinState?.overallRiskScore;
+  const twinEntityCount = operationalTwinSummary?.entityCount ?? operationalTwinState?.entities.length;
+  const twinVersion = operationalTwinSummary?.version ?? operationalTwinState?.version;
 
   return (
     <main className="min-h-screen bg-slate-950 text-white flex">
@@ -385,42 +624,43 @@ export default function Home() {
                   <div>
                     <p className="text-slate-500">Overall Status</p>
                     <p className={`font-semibold ${
-                      operationalTwinState.overallStatus === "healthy" ? "text-emerald-400" :
-                      operationalTwinState.overallStatus === "critical" ? "text-red-400" :
-                      operationalTwinState.overallStatus === "warning" ? "text-amber-400" :
+                      twinOverallStatus === "healthy" ? "text-emerald-400" :
+                      twinOverallStatus === "critical" ? "text-red-400" :
+                      twinOverallStatus === "warning" ? "text-amber-400" :
                       "text-slate-300"
                     }`}>
-                      {operationalTwinState.overallStatus.charAt(0).toUpperCase() + operationalTwinState.overallStatus.slice(1)}
+                      {twinOverallStatus ? twinOverallStatus.charAt(0).toUpperCase() + twinOverallStatus.slice(1) : "Unknown"}
                     </p>
                   </div>
                   <div>
                     <p className="text-slate-500">Health Score</p>
-                    <p className="font-semibold text-emerald-400">{operationalTwinState.overallHealthScore}%</p>
+                    <p className="font-semibold text-emerald-400">{twinHealthScore}%</p>
                   </div>
                   <div>
                     <p className="text-slate-500">Risk Score</p>
-                    <p className="font-semibold text-amber-400">{operationalTwinState.overallRiskScore}</p>
+                    <p className="font-semibold text-amber-400">{twinRiskScore}</p>
                   </div>
                   <div>
                     <p className="text-slate-500">Entity Count</p>
-                    <p className="font-semibold text-cyan-400">{operationalTwinState.entities.length}</p>
+                    <p className="font-semibold text-cyan-400">{twinEntityCount}</p>
                   </div>
                   <div>
                     <p className="text-slate-500">State Version</p>
-                    <p className="font-semibold text-slate-300">v{operationalTwinState.version}</p>
+                    <p className="font-semibold text-slate-300">v{twinVersion}</p>
                   </div>
                   <div>
                     <p className="text-slate-500">Active Simulation</p>
                     <p className="font-semibold text-purple-400">
-                      {operationalTwinState.activeSimulation ? operationalTwinState.activeSimulation.status : "None"}
+                      {activeSimulation ? activeSimulation.status : "None"}
                     </p>
                   </div>
                   <div>
                     <p className="text-slate-500">Human Approval</p>
                     <p className={`font-semibold ${
-                      operationalTwinState.activeSimulation?.requiresHumanApproval ? "text-red-400" : "text-slate-400"
+                      approvalUiState === "required" || approvalUiState === "rejected" ? "text-red-400" :
+                      approvalUiState === "satisfied" ? "text-emerald-400" : "text-slate-400"
                     }`}>
-                      {operationalTwinState.activeSimulation?.requiresHumanApproval ? "Required" : "Not Required"}
+                      {approvalUiCopy.operationalTwin}
                     </p>
                   </div>
                   <div>
@@ -446,7 +686,9 @@ export default function Home() {
               <span className="text-slate-500">|</span>
               <span className="text-cyan-300">Synthetic Data Only</span>
               <span className="text-slate-500">|</span>
-              <span className="text-cyan-300">Human Approval Required</span>
+              <span className="text-cyan-300">
+                {approvalUiCopy.safetyStrip}
+              </span>
             </div>
           </div>
 
@@ -595,12 +837,19 @@ export default function Home() {
                     </div>
                     <p className="text-xs text-slate-400 mb-3">{rec.reason}</p>
                     {rec.targetGpuId && (
-                      <p className="text-xs text-slate-500 mb-2">Target GPU: {rec.targetGpuId}</p>
+                      <p className="text-xs text-slate-500 mb-2">Target GPU: {formatGpuLabel(rec.targetGpuId)}</p>
                     )}
-                    {rec.requiresHumanApproval && (
+                    {rec.requiresHumanApproval &&
+                      activeSimulation?.recommendationId === rec.id && (
                       <div className="mb-2">
-                        <span className="text-xs px-2 py-1 rounded-full border border-red-500/30 bg-red-500/10 text-red-400">
-                          Human Approval Required
+                        <span className={`text-xs px-2 py-1 rounded-full border ${
+                          approvalUiState === "satisfied"
+                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                            : approvalUiState === "rejected"
+                              ? "border-red-500/30 bg-red-500/10 text-red-400"
+                              : "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                        }`}>
+                          {approvalUiCopy.routePlanner}
                         </span>
                       </div>
                     )}
@@ -717,9 +966,28 @@ export default function Home() {
           Human Approval Queue
         </h2>
         <div className="grid gap-4 md:grid-cols-3">
-          {recommendations.slice(0, 3).map((rec) => {
-            const isApproved = approvedRecs.has(rec.id);
-            const isRejected = rejectedRecs.has(rec.id);
+          {approvalRecommendations.length > 0 ? approvalRecommendations.map((rec) => {
+            const canonicalApproval = activeSimulation?.approval?.recommendationId === rec.id
+              ? activeSimulation.approval
+              : null;
+            const isCurrentRecommendation = activeSimulation?.recommendationId === rec.id;
+            const recommendationApprovalUiState = isCurrentRecommendation
+              ? approvalUiState
+              : "pending";
+            const isApproved = recommendationApprovalUiState === "satisfied" &&
+              canonicalApproval?.decision === "approve";
+            const isRejected = recommendationApprovalUiState === "rejected" &&
+              canonicalApproval?.decision === "reject";
+            const isAwaitingDecision = activeSimulation?.status === "awaiting-approval" &&
+              activeSimulation.recommendationId === rec.id;
+            const canAct = rec.requiresHumanApproval === true &&
+              rec.id.trim().length > 0 &&
+              isAwaitingDecision &&
+              hasApprovalPermission;
+            const displayedTarget = canonicalApproval?.targetGpuId ??
+              activeSimulation?.recommendedTargetGpuId ??
+              rec.targetGpuId;
+
             return (
               <div key={rec.id} className={`rounded-xl border p-4 backdrop-blur-sm ${
                 isApproved ? "border-emerald-500/30 bg-emerald-500/10" :
@@ -729,49 +997,77 @@ export default function Home() {
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <p className="font-semibold text-slate-300">{rec.workloadName}</p>
-                    <p className="text-xs text-slate-500 capitalize">{rec.action} → {rec.targetClusterType}</p>
+                    <p className="text-xs text-slate-500">Target: {formatGpuLabel(displayedTarget)}</p>
                   </div>
-                  <div className="flex gap-2">
-                    <span className={`text-xs px-2 py-1 rounded-full border ${
-                      rec.safetyStatus === "safe" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" :
-                      rec.safetyStatus === "warning" ? "text-amber-400 border-amber-500/30 bg-amber-500/10" :
-                      "text-red-400 border-red-500/30 bg-red-500/10"
-                    }`}>
-                      {rec.safetyStatus}
-                    </span>
-                  </div>
+                  <span className={`text-xs px-2 py-1 rounded-full border ${
+                    rec.safetyStatus === "safe" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" :
+                    rec.safetyStatus === "warning" ? "text-amber-400 border-amber-500/30 bg-amber-500/10" :
+                    "text-red-400 border-red-500/30 bg-red-500/10"
+                  }`}>
+                    {rec.safetyStatus}
+                  </span>
                 </div>
                 <p className="text-xs text-slate-400 mb-3">{rec.reason}</p>
+                {rec.deadlineSeconds !== undefined && (
+                  <p className="text-xs text-amber-300 mb-2">{rec.deadlineSeconds}-second deadline</p>
+                )}
+                <div className="mb-3">
+                  <span className={`text-xs px-2 py-1 rounded-full border ${
+                    isApproved ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" :
+                    isRejected ? "border-red-500/30 bg-red-500/10 text-red-400" :
+                    "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                  }`}>
+                    {APPROVAL_UI_COPY[recommendationApprovalUiState].queue}
+                  </span>
+                </div>
                 {isApproved ? (
-                  <p className="text-xs text-emerald-400 font-medium">✓ Approved by {operatorName || "Human Operator"}</p>
+                  <div className="space-y-1 text-xs">
+                    <p className="text-emerald-400 font-medium">Approved by {canonicalApproval.operatorName}</p>
+                    <p className="text-emerald-300">{formatGpuLabel(canonicalApproval.targetGpuId)}</p>
+                    <p className="text-emerald-400">Approval satisfied</p>
+                  </div>
                 ) : isRejected ? (
-                  <p className="text-xs text-red-400 font-medium">✗ Rejected - manual review required</p>
-                ) : !isLoggedIn ? (
+                  <div className="space-y-1 text-xs">
+                    <p className="text-red-400 font-medium">Rejected by {canonicalApproval.operatorName}</p>
+                    <p className="text-slate-400">No action executed</p>
+                  </div>
+                ) : isAwaitingDecision && !hasApprovalPermission ? (
                   <button
                     onClick={() => setShowLoginModal(true)}
                     className="w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300 hover:bg-amber-500/20 transition-colors"
                   >
                     Operator login required
                   </button>
-                ) : (
+                ) : canAct ? (
                   <div className="flex gap-2">
                     <button
-                      onClick={() => setApprovedRecs(new Set([...approvedRecs, rec.id]))}
-                      className="flex-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+                      onClick={() => handleApprovalDecision("approve", rec.id)}
+                      disabled={pendingApprovalDecision !== null}
+                      className="flex-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
                     >
-                      Approve
+                      {pendingApprovalDecision === "approve" ? "Approving..." : "Approve"}
                     </button>
                     <button
-                      onClick={() => setRejectedRecs(new Set([...rejectedRecs, rec.id]))}
-                      className="flex-1 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300 hover:bg-red-500/20 transition-colors"
+                      onClick={() => handleApprovalDecision("reject", rec.id)}
+                      disabled={pendingApprovalDecision !== null}
+                      className="flex-1 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
                     >
-                      Reject
+                      {pendingApprovalDecision === "reject" ? "Rejecting..." : "Reject"}
                     </button>
                   </div>
+                ) : (
+                  <p className="text-xs text-slate-400">This recommendation is not awaiting a decision.</p>
+                )}
+                {approvalError && (
+                  <p className="mt-3 text-xs text-red-400" role="alert">{approvalError}</p>
                 )}
               </div>
             );
-          })}
+          }) : (
+            <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm md:col-span-3">
+              <p className="text-sm text-slate-400">No recommendations require human approval.</p>
+            </div>
+          )}
         </div>
       </section>
 

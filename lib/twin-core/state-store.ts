@@ -7,6 +7,7 @@
 
 import {
   type OperationalTwinState,
+  type OperationalTwinSummary,
   type TwinApprovalAuditEvent,
   type TwinApprovalDecision,
   type TwinApprovalRecord,
@@ -17,6 +18,13 @@ const MEDROUTEX_CRISIS_SCENARIO_ID = "medroutex-stroke-crisis";
 const MEDROUTEX_CRISIS_RECOMMENDATION_ID = "rec-workload-stroke-ct-001-0";
 const MEDROUTEX_CRISIS_TARGET_GPU_ID = "gpu-central-7";
 const DETERMINISTIC_APPROVAL_TIMESTAMP = "2024-01-15T10:33:00.000Z";
+const OPERATIONAL_TWIN_STATE_KEY = "__MEDROUTEX_OPERATIONAL_TWIN_STATE__" as const;
+
+type OperationalTwinGlobal = typeof globalThis & {
+  [OPERATIONAL_TWIN_STATE_KEY]?: OperationalTwinState;
+};
+
+const operationalTwinGlobal = globalThis as OperationalTwinGlobal;
 
 export interface ApprovalDecisionInput {
   decision: TwinApprovalDecision;
@@ -52,20 +60,24 @@ export class ApprovalDecisionError extends Error {
   }
 }
 
-/**
- * Module-level in-memory state storage
- */
-let operationalTwinState: OperationalTwinState | null = null;
+function setOperationalTwinState(
+  nextState: OperationalTwinState
+): OperationalTwinState {
+  operationalTwinGlobal[OPERATIONAL_TWIN_STATE_KEY] = nextState;
+  return nextState;
+}
 
 /**
  * Get the current operational twin state
  * Lazily initializes state using createInitialOperationalTwinState() if not already set
  */
 export function getOperationalTwinState(): OperationalTwinState {
-  if (operationalTwinState === null) {
-    operationalTwinState = createInitialOperationalTwinState();
+  const currentState = operationalTwinGlobal[OPERATIONAL_TWIN_STATE_KEY];
+  if (currentState !== undefined) {
+    return currentState;
   }
-  return operationalTwinState;
+
+  return setOperationalTwinState(createInitialOperationalTwinState());
 }
 
 /**
@@ -73,8 +85,7 @@ export function getOperationalTwinState(): OperationalTwinState {
  * Replaces the entire state with a new initial state
  */
 export function resetOperationalTwinState(): OperationalTwinState {
-  operationalTwinState = createInitialOperationalTwinState();
-  return operationalTwinState;
+  return setOperationalTwinState(createInitialOperationalTwinState());
 }
 
 /**
@@ -84,14 +95,13 @@ export function resetOperationalTwinState(): OperationalTwinState {
 export function replaceOperationalTwinState(
   nextState: OperationalTwinState
 ): OperationalTwinState {
-  operationalTwinState = nextState;
-  return operationalTwinState;
+  return setOperationalTwinState(nextState);
 }
 
 /**
  * Get a summary of the operational twin state
  */
-export function getOperationalTwinSummary() {
+export function getOperationalTwinSummary(): OperationalTwinSummary {
   const state = getOperationalTwinState();
   return {
     twinId: state.twinId,
@@ -115,8 +125,7 @@ export function getOperationalTwinSummary() {
  */
 export function applyCrisisScenarioToState(): OperationalTwinState {
   const currentState = getOperationalTwinState();
-  operationalTwinState = applyCrisisScenario(currentState);
-  return operationalTwinState;
+  return setOperationalTwinState(applyCrisisScenario(currentState));
 }
 
 /**
@@ -211,7 +220,7 @@ export function applyApprovalDecision(
     simulationOnly: true,
   };
 
-  operationalTwinState = {
+  const nextState: OperationalTwinState = {
     ...currentState,
     version: currentState.version + 1,
     lastSynchronizedAt: DETERMINISTIC_APPROVAL_TIMESTAMP,
@@ -223,10 +232,11 @@ export function applyApprovalDecision(
     },
     approvalAuditEvents: [...currentState.approvalAuditEvents, auditEvent],
   };
+  setOperationalTwinState(nextState);
 
   return {
     outcome: "applied",
-    state: operationalTwinState,
+    state: nextState,
     approval,
     auditEvent,
   };

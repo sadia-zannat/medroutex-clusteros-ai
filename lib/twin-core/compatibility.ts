@@ -1,5 +1,82 @@
-import type { MeshState, Gpu, ClusterSummary, AuditLog } from "../medroutex/types";
+import type {
+  MeshState,
+  Gpu,
+  ClusterSummary,
+  AuditLog,
+  Workload,
+} from "../medroutex/types";
+import { TOTAL_WORKLOADS, WORKLOAD_NAMES } from "../medroutex/constants";
 import type { OperationalTwinState, TwinEntity } from "./types";
+
+const COMPATIBILITY_PRIORITIES: readonly Workload["priority"][] = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "research",
+];
+
+const COMPATIBILITY_PRIVACY_POLICIES: readonly Workload["privacyPolicy"][] = [
+  "central-allowed",
+  "edge-allowed",
+  "central-allowed",
+  "cloud-allowed",
+  "on-prem-only",
+];
+
+function createCompatibilityWorkloads(hasCrisisGpus: boolean): Workload[] {
+  const localTargetIds = hasCrisisGpus
+    ? ["gpu-local-0", "gpu-local-3"]
+    : ["gpu-local-0", "gpu-local-1", "gpu-local-2", "gpu-local-3"];
+  const centralTargetIds = [
+    "gpu-central-0",
+    "gpu-central-1",
+    "gpu-central-7",
+    "gpu-central-2",
+  ];
+  const cloudTargetIds = ["gpu-cloud-0", "gpu-cloud-1"];
+
+  return Array.from({ length: TOTAL_WORKLOADS }, (_, index): Workload => {
+    if (index === 0) {
+      return {
+        id: "workload-stroke-ct-001",
+        name: hasCrisisGpus ? "Emergency Stroke CT" : "Stroke CT AI",
+        type: "inference",
+        priority: "critical",
+        deadlineSeconds: hasCrisisGpus ? 120 : 300,
+        remainingSeconds: hasCrisisGpus ? 120 : 300,
+        privacyPolicy: hasCrisisGpus ? "central-allowed" : "on-prem-only",
+        computeNeed: 5,
+        memoryNeed: 4,
+        status: "running",
+        assignedGpuId: hasCrisisGpus ? "gpu-local-1" : "gpu-local-0",
+      };
+    }
+
+    const privacyPolicy =
+      COMPATIBILITY_PRIVACY_POLICIES[index % COMPATIBILITY_PRIVACY_POLICIES.length];
+    const assignedGpuId = privacyPolicy === "on-prem-only"
+      ? localTargetIds[index % localTargetIds.length]
+      : privacyPolicy === "cloud-allowed"
+        ? cloudTargetIds[index % cloudTargetIds.length]
+        : centralTargetIds[index % centralTargetIds.length];
+    const deadlineSeconds = 300 + index * 60;
+
+    return {
+      id: `workload-synthetic-${String(index + 1).padStart(3, "0")}`,
+      name: WORKLOAD_NAMES[index % WORKLOAD_NAMES.length],
+      type: "inference",
+      priority: COMPATIBILITY_PRIORITIES[index % COMPATIBILITY_PRIORITIES.length],
+      deadlineSeconds,
+      remainingSeconds: deadlineSeconds,
+      privacyPolicy,
+      computeNeed: 5 + (index % 5),
+      memoryNeed: 4 + (index % 4),
+      status: "running",
+      assignedGpuId,
+    };
+  });
+}
 
 /**
  * Compatibility adapter: Derive legacy MeshState from canonical OperationalTwinState
@@ -28,7 +105,7 @@ export function deriveMeshStateFromOperationalTwin(
   
   if (hasCrisisGPUs) {
     // Generate baseline GPU cluster (10 GPUs: 4 local, 4 central, 2 cloud)
-    // Use specific IDs for crisis mapping (gpu-local-2, gpu-local-3, gpu-central-7)
+    // Legacy local IDs are zero-based while visible dashboard labels are one-based.
     gpus = [
       // Local GPUs 0-3
       {
@@ -236,10 +313,10 @@ export function deriveMeshStateFromOperationalTwin(
     ];
 
     // Overwrite specific GPUs with crisis state from Operational Twin
-    // Map Operational Twin entity IDs to dashboard GPU IDs
+    // Map one-based Operational Twin entity numbers to legacy dashboard IDs.
     const gpuIdMapping: Record<string, string> = {
-      "compute-local-gpu-02": "gpu-local-2",
-      "compute-local-gpu-03": "gpu-local-3",
+      "compute-local-gpu-02": "gpu-local-1",
+      "compute-local-gpu-03": "gpu-local-2",
       "compute-central-gpu-07": "gpu-central-7",
     };
 
@@ -511,6 +588,30 @@ export function deriveMeshStateFromOperationalTwin(
     ];
   }
 
+  // Normalize array positions to the dashboard's global one-based GPU labels.
+  // Central GPU-7 must occupy visible position 7; Central GPU-2 remains the
+  // unrelated baseline node at visible position 8.
+  const visibleGpuIdOrder: readonly string[] = [
+    "gpu-local-0",
+    "gpu-local-1",
+    "gpu-local-2",
+    "gpu-local-3",
+    "gpu-central-0",
+    "gpu-central-1",
+    "gpu-central-7",
+    "gpu-central-2",
+    "gpu-cloud-0",
+    "gpu-cloud-1",
+  ];
+  const visiblePositionById = new Map(
+    visibleGpuIdOrder.map((gpuId, index) => [gpuId, index])
+  );
+  gpus.sort(
+    (a, b) =>
+      (visiblePositionById.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (visiblePositionById.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+  );
+
   // Calculate cluster summaries
   const clusters: ClusterSummary[] = [
     {
@@ -558,91 +659,14 @@ export function deriveMeshStateFromOperationalTwin(
   const clusterHealth = operationalTwin.overallHealthScore;
   const estimatedSaving = idleGpus * 150;
 
-  // Create synthetic workloads (for dashboard compatibility)
-  const workloads = hasCrisisGPUs ? [
-    {
-      id: "workload-stroke-ct-001",
-      name: "Emergency Stroke CT",
-      type: "inference",
-      priority: "critical" as const,
-      deadlineSeconds: 120,
-      remainingSeconds: 120,
-      privacyPolicy: "central-allowed" as const,
-      computeNeed: 5,
-      memoryNeed: 4,
-      status: operationalTwin.activeSimulation ? "pending" : "pending",
-      assignedGpuId: undefined,
-    },
-    {
-      id: "workload-trauma-ct-002",
-      name: "Trauma CT AI",
-      type: "inference",
-      priority: "high" as const,
-      deadlineSeconds: 300,
-      remainingSeconds: 300,
-      privacyPolicy: "edge-allowed" as const,
-      computeNeed: 6,
-      memoryNeed: 5,
-      status: "pending",
-      assignedGpuId: undefined,
-    },
-  ] : [
-    {
-      id: "workload-stroke-ct-001",
-      name: "Stroke CT AI",
-      type: "inference",
-      priority: "critical" as const,
-      deadlineSeconds: 300,
-      remainingSeconds: 300,
-      privacyPolicy: "on-prem-only" as const,
-      computeNeed: 5,
-      memoryNeed: 4,
-      status: "pending",
-      assignedGpuId: undefined,
-    },
-    {
-      id: "workload-trauma-ct-002",
-      name: "Trauma CT AI",
-      type: "inference",
-      priority: "high" as const,
-      deadlineSeconds: 360,
-      remainingSeconds: 360,
-      privacyPolicy: "edge-allowed" as const,
-      computeNeed: 6,
-      memoryNeed: 5,
-      status: "pending",
-      assignedGpuId: undefined,
-    },
-    {
-      id: "workload-icu-chest-003",
-      name: "ICU Chest X-ray",
-      type: "inference",
-      priority: "medium" as const,
-      deadlineSeconds: 420,
-      remainingSeconds: 420,
-      privacyPolicy: "central-allowed" as const,
-      computeNeed: 7,
-      memoryNeed: 6,
-      status: "pending",
-      assignedGpuId: undefined,
-    },
-    {
-      id: "workload-mri-seg-004",
-      name: "MRI Segmentation",
-      type: "inference",
-      priority: "low" as const,
-      deadlineSeconds: 480,
-      remainingSeconds: 480,
-      privacyPolicy: "cloud-allowed" as const,
-      computeNeed: 8,
-      memoryNeed: 7,
-      status: "pending",
-      assignedGpuId: undefined,
-    },
-  ];
-
-  const activeWorkloads = 20; // Fixed for dashboard compatibility
-  const criticalWorkloads = 4; // Fixed for dashboard compatibility
+  // Keep the full deterministic 20-workload demo inventory in every derived view.
+  const workloads = createCompatibilityWorkloads(hasCrisisGPUs);
+  const activeWorkloads = workloads.filter(
+    (workload) => workload.status === "running" || workload.status === "pending"
+  ).length;
+  const criticalWorkloads = workloads.filter(
+    (workload) => workload.priority === "critical"
+  ).length;
 
   // Create audit log (deterministic ID based on state version)
   const auditLogs: AuditLog[] = [

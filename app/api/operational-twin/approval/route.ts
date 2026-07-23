@@ -3,6 +3,7 @@ import type { TwinApprovalDecision } from "@/lib/twin-core/types";
 import {
   ApprovalDecisionError,
   applyApprovalDecision,
+  getOperationalTwinSummary,
   type ApprovalDecisionInput,
 } from "@/lib/twin-core/state-store";
 
@@ -100,11 +101,13 @@ export async function POST(request: Request) {
 
   try {
     const result = applyApprovalDecision(input);
+    const summary = getOperationalTwinSummary();
 
     return NextResponse.json({
       success: true,
       outcome: result.outcome,
       data: result.state,
+      summary,
       approval: result.approval,
       auditEvent: result.auditEvent,
       metadata: {
