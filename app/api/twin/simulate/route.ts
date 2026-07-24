@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getOperationalTwinState } from "@/lib/twin-core/state-store";
+import { getDashboardScenarioId } from "@/lib/twin-core/scenario-identity";
 import { simulateDigitalTwin } from "@/lib/medroutex/digital-twin";
 
 export const dynamic = "force-dynamic";
@@ -12,17 +13,14 @@ export async function GET() {
     (recordedEvaluation.evaluatedStateVersion === state.version ||
       recordedEvaluation.decisionStatus === "approved" ||
       recordedEvaluation.decisionStatus === "rejected");
-  const scenario =
-    state.activeSimulation?.scenarioId ??
-    (state.overallStatus === "critical"
-      ? "medroutex-stroke-crisis"
-      : "normal_day");
   const result = simulateDigitalTwin(
     evaluationIsCurrent ? recordedEvaluation : null,
     {
-      scenario,
+      scenario: getDashboardScenarioId(state),
       healthScore: state.overallHealthScore,
       riskyGpuCount: state.domains.compute.riskyGpus,
+      modeledOverallRiskReductionPercent:
+        state.activeSimulation?.predictedRiskReductionPercent ?? 0,
     }
   );
 

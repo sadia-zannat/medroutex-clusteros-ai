@@ -5,14 +5,14 @@ import {
   resetOperationalTwinState,
 } from "../twin-core/state-store";
 import { deriveMeshStateFromOperationalTwin } from "../twin-core/compatibility";
+import { getDashboardScenarioId } from "../twin-core/scenario-identity";
 
 function deriveCurrentMeshState(): MeshState {
   const operationalTwinState = getOperationalTwinState();
-  const scenario = operationalTwinState.overallStatus === "critical"
-    ? "medroutex-stroke-crisis"
-    : "normal_day";
-
-  return deriveMeshStateFromOperationalTwin(operationalTwinState, scenario);
+  return deriveMeshStateFromOperationalTwin(
+    operationalTwinState,
+    getDashboardScenarioId(operationalTwinState)
+  );
 }
 
 export function getCurrentState(): MeshState {

@@ -19,8 +19,11 @@ import {
   type TwinApprovalDecision,
   type TwinApprovalRecord,
   type ScenarioState,
+  type LiveGpuTelemetry,
 } from "./types";
-import { createInitialOperationalTwinState, applyCrisisScenario } from "./seed";
+import { createInitialOperationalTwinState, INITIAL_SCENARIO_RUNTIME } from "./seed";
+import { resetScenarioRuntime } from "./scenario-transitions";
+import { executeScenarioTransition } from "./scenario-engine";
 import { getScenarioCatalog } from "./scenario-catalog";
 import {
   ExistingGpuTelemetryAdapter,
@@ -32,7 +35,6 @@ import {
   appendOperationalEvents,
   createBaselineResetEvent,
   createConnectorFailureEvents,
-  createCrisisEvents,
   createDecisionEvent,
   createEmailDeliveryFailureEvent,
   createSynchronizationFailureEvent,
@@ -51,9 +53,6 @@ import {
 } from "../guard-ruler/engine";
 import { createGuardRulerEvents } from "../guard-ruler/events";
 
-const MEDROUTEX_CRISIS_SCENARIO_ID = "medroutex-stroke-crisis";
-const MEDROUTEX_CRISIS_RECOMMENDATION_ID = "rec-workload-stroke-ct-001-0";
-const MEDROUTEX_CRISIS_TARGET_GPU_ID = "gpu-central-7";
 const OPERATIONAL_TWIN_STATE_KEY = "__MEDROUTEX_OPERATIONAL_TWIN_STATE__" as const;
 const MAX_GUARD_RULER_EVALUATION_HISTORY = 50;
 
@@ -336,7 +335,10 @@ function ensureOperationalCollections(
     Array.isArray(runtimeState.emailDeliveryReservations) &&
     Array.isArray(runtimeState.activeIncidents) &&
     runtimeState.oxygenAlertLifecycle !== undefined &&
-    Array.isArray(runtimeState.latestSynchronization?.failedProviders);
+    Array.isArray(runtimeState.latestSynchronization?.failedProviders) &&
+    runtimeState.scenarioRuntime !== undefined &&
+    "liveHardwareGpu" in runtimeState &&
+    runtimeState.persistence !== undefined;
 
   const stateWithCollections = hasAllCollections
     ? state
@@ -362,6 +364,15 @@ function ensureOperationalCollections(
           recoveryConfirmationCycles: 0,
           lastEvaluatedAt: null,
           lastEvaluationFingerprint: null,
+        },
+        scenarioRuntime: INITIAL_SCENARIO_RUNTIME,
+        liveHardwareGpu: runtimeState.liveHardwareGpu ?? null,
+        persistence: runtimeState.persistence ?? {
+          mode: "memory-only",
+          databasePath: null,
+          lastPersistedAt: null,
+          lastRestoredAt: null,
+          lastError: null,
         },
       };
 
@@ -433,11 +444,17 @@ export function getOperationalTwinState(): OperationalTwinState {
 /**
  * Reset the operational twin state to a fresh initial state
  * Replaces the entire state with a new initial state
+ * Also clears scenario runtime state
  */
 export function resetOperationalTwinState(): OperationalTwinState {
-  return setOperationalTwinState(
-    ensureOperationalCollections(createInitialOperationalTwinState())
-  );
+  const currentState = operationalTwinGlobal[OPERATIONAL_TWIN_STATE_KEY];
+  const initialState = ensureOperationalCollections(createInitialOperationalTwinState());
+  const stateWithResetScenario = resetScenarioRuntime({
+    ...initialState,
+    liveHardwareGpu: currentState?.liveHardwareGpu ?? null,
+    persistence: currentState?.persistence ?? initialState.persistence,
+  });
+  return setOperationalTwinState(stateWithResetScenario);
 }
 
 /**
@@ -448,6 +465,53 @@ export function replaceOperationalTwinState(
   nextState: OperationalTwinState
 ): OperationalTwinState {
   return setOperationalTwinState(nextState);
+}
+
+/**
+ * Store live local GPU telemetry separately from the ten simulation nodes.
+ * Scenario transitions and resets preserve this field and never overwrite it.
+ */
+export function updateLiveHardwareGpu(
+  telemetry: LiveGpuTelemetry
+): OperationalTwinState {
+  const currentState = getOperationalTwinState();
+  const timestamp = telemetry.collectedAt;
+  const nextState: OperationalTwinState = {
+    ...currentState,
+    liveHardwareGpu: telemetry,
+  };
+  const eventTimestampKey = timestamp.replace(/[^0-9]/g, "");
+  const eventResult = appendOperationalEvents(nextState, [
+    {
+      id: `event-live-gpu-sync-${eventTimestampKey}`,
+      eventType: "system-event",
+      category: "telemetry",
+      domain: "compute",
+      severity: telemetry.connectionStatus === "connected" ? "success" : "warning",
+      status: telemetry.connectionStatus === "connected" ? "completed" : "failed",
+      title: telemetry.connectionStatus === "connected"
+        ? "Live Local GPU Telemetry Synchronized"
+        : "Live Local GPU Telemetry Unavailable",
+      message: telemetry.connectionStatus === "connected"
+        ? `${telemetry.gpuName ?? "Local NVIDIA GPU"} telemetry was collected without changing simulation nodes.`
+        : telemetry.error ?? "nvidia-smi telemetry is unavailable.",
+      reason: "Operator-requested local hardware telemetry synchronization.",
+      timestamp,
+      sourceEntityIds: [],
+      correlationId: `live-gpu-sync-${eventTimestampKey}`,
+      dedupeKey: `live-gpu-sync:${timestamp}`,
+      simulationOnly: true,
+      source: "Live Local Hardware Telemetry",
+      metadata: {
+        notificationVisibility: "history-only",
+        simulationProtected: true,
+        simulationNodesUnaffected: true,
+        connectionStatus: telemetry.connectionStatus,
+      },
+      stateVersion: nextState.version,
+    },
+  ]);
+  return setOperationalTwinState(eventResult.state);
 }
 
 export function acknowledgeOperationalNotifications(
@@ -639,25 +703,28 @@ export function getOperationalTwinSummary(): OperationalTwinSummary {
 }
 
 /**
- * Get the current scenario state (Phase 1: read-only).
- * This extends the canonical singleton with scenario catalog inspection.
+ * Get the current scenario state (Phase 2: execution implemented).
+ * This extends the canonical singleton with scenario catalog inspection and runtime state.
  */
 export function getScenarioState(): ScenarioState {
   const state = getOperationalTwinState();
   const catalog = getScenarioCatalog();
-  const activeSimulation = state.activeSimulation;
+  const runtime = state.scenarioRuntime;
+  const activeScenario = runtime.activeScenarioId
+    ? catalog.scenarios.find((entry) => entry.id === runtime.activeScenarioId) ?? null
+    : null;
 
   return {
-    activeScenarioId: activeSimulation?.scenarioId ?? null,
-    activeScenarioName: activeSimulation?.scenarioName ?? null,
-    activeScenarioStatus: activeSimulation?.status ?? null,
+    activeScenarioId: runtime.activeScenarioId,
+    activeScenarioName: activeScenario?.name ?? null,
+    activeScenarioStatus: runtime.scenarioStatus,
     availableScenarios: catalog.scenarios,
-    canActivateScenario: activeSimulation === null,
-    lastScenarioTransitionAt: activeSimulation?.startedAt ?? null,
+    canActivateScenario: runtime.activeScenarioId === null && state.activeSimulation === null,
+    lastScenarioTransitionAt: runtime.lastTransitionAt,
     metadata: {
-      phase: 1,
-      readOnly: true,
-      mutationNotImplemented: true,
+      phase: 2,
+      readOnly: false,
+      mutationImplemented: true,
     },
   };
 }
@@ -668,27 +735,14 @@ export function getScenarioState(): ScenarioState {
  */
 export function applyCrisisScenarioToState(): OperationalTwinState {
   const currentState = getOperationalTwinState();
-  const timestamp = new Date().toISOString();
-  const scenarioState = applyCrisisScenario(currentState, timestamp);
-  if (scenarioState === currentState) return currentState;
-
-  const evaluation = evaluateGuardRuler(scenarioState, {
-    evaluatedAt: timestamp,
-  });
-  const stateWithEvaluation: OperationalTwinState = {
-    ...scenarioState,
-    latestGuardRulerEvaluation: evaluation,
-    guardRulerEvaluationHistory:
-      appendGuardRulerEvaluationHistory(
-        scenarioState.guardRulerEvaluationHistory,
-        evaluation
-      ),
-  };
-  const eventResult = appendOperationalEvents(stateWithEvaluation, [
-    ...createCrisisEvents(stateWithEvaluation, timestamp),
-    ...createGuardRulerEvents(evaluation),
-  ]);
-  return setOperationalTwinState(eventResult.state);
+  const result = executeScenarioTransition(currentState, "stroke-compute-crisis");
+  if (!result.success || result.outcome === "invalid-request") {
+    return currentState;
+  }
+  if (result.outcome === "idempotent" || !result.fullState) {
+    return currentState;
+  }
+  return setOperationalTwinState(result.fullState);
 }
 
 /**
@@ -884,13 +938,15 @@ export function applyApprovalDecision(
     );
   }
 
+  const planA = currentState.latestGuardRulerEvaluation?.planSet.planA ?? null;
+  const targetGpuId = planA?.candidatePlan.targetGpuId ?? null;
   const isCurrentCrisisRecommendation =
-    activeSimulation.scenarioId === MEDROUTEX_CRISIS_SCENARIO_ID &&
-    activeSimulation.recommendationId === MEDROUTEX_CRISIS_RECOMMENDATION_ID &&
+    targetGpuId !== null &&
     activeSimulation.recommendationId === input.recommendationId &&
-    activeSimulation.recommendedTargetGpuId === MEDROUTEX_CRISIS_TARGET_GPU_ID;
+    planA?.candidatePlan.recommendationId === input.recommendationId &&
+    activeSimulation.recommendedTargetGpuId === targetGpuId;
 
-  if (!isCurrentCrisisRecommendation) {
+  if (!isCurrentCrisisRecommendation || !planA || !targetGpuId) {
     throw new ApprovalDecisionError(
       "RECOMMENDATION_MISMATCH",
       "The decision does not refer to the current MedRouteX crisis recommendation."
@@ -954,7 +1010,7 @@ export function applyApprovalDecision(
     decision: input.decision,
     satisfied: input.decision === "approve",
     recommendationId: input.recommendationId,
-    targetGpuId: MEDROUTEX_CRISIS_TARGET_GPU_ID,
+    targetGpuId,
     operatorName: input.operatorName,
     operatorRole: input.operatorRole,
     decidedAt: decisionTimestamp,
@@ -967,7 +1023,7 @@ export function applyApprovalDecision(
     decision: input.decision,
     simulationId: activeSimulation.id,
     recommendationId: input.recommendationId,
-    targetGpuId: MEDROUTEX_CRISIS_TARGET_GPU_ID,
+    targetGpuId,
     operatorName: input.operatorName,
     operatorRole: input.operatorRole,
     timestamp: decisionTimestamp,
@@ -1006,6 +1062,13 @@ export function applyApprovalDecision(
       status: input.decision === "approve" ? "approved" : "rejected",
       approvalSatisfied: approval.satisfied,
       approval,
+    },
+    scenarioRuntime: {
+      ...currentState.scenarioRuntime,
+      scenarioStatus: input.decision === "approve" ? "approved" : "rejected",
+      lastTransitionAt: decisionTimestamp,
+      humanApprovalRequired: false,
+      physicalExecutionPerformed: false,
     },
     approvalAuditEvents: [...currentState.approvalAuditEvents, auditEvent],
   };

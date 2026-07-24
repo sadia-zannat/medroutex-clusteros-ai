@@ -60,6 +60,10 @@ const HISTORY_KINDS: readonly UnifiedHistoryKind[] = [
   "email-delivery",
   "twin-snapshot",
   "audit-event",
+  "incident",
+  "scenario-root-cause",
+  "cascade-path",
+  "response-plan",
 ];
 
 const SEVERITIES: readonly OperationalEventSeverity[] = [
@@ -131,6 +135,10 @@ const KIND_LABELS: Record<UnifiedHistoryKind, string> = {
   "email-delivery": "Email Delivery",
   "twin-snapshot": "Twin Snapshot",
   "audit-event": "Audit Event",
+  incident: "Active Incident",
+  "scenario-root-cause": "Scenario Root Cause",
+  "cascade-path": "Cascade Path",
+  "response-plan": "Response Plan",
 };
 
 const EMPTY_HISTORY_RECORDS: UnifiedHistoryRecord[] = [];
@@ -299,6 +307,9 @@ function recordMatchesTab(
       return record.kind === "notification";
     case "incidents-risks":
       return (
+        record.kind === "incident" ||
+        record.kind === "scenario-root-cause" ||
+        record.kind === "cascade-path" ||
         record.category === "incident" ||
         record.category === "risk" ||
         (record.kind === "operational-event" && record.status === "active")
@@ -308,6 +319,7 @@ function recordMatchesTab(
     case "decisions-audit":
       return (
         record.kind === "audit-event" ||
+        record.kind === "response-plan" ||
         record.domain === "approval" ||
         record.category === "approval" ||
         record.category === "audit" ||

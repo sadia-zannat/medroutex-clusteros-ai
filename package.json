@@ -6,7 +6,10 @@
     "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test:core": "node scripts/run-core-regression.mjs",
+    "check": "npm run typecheck && npm run test:core && npm run lint && npm run build"
   },
   "dependencies": {
     "clsx": "^2.1.1",

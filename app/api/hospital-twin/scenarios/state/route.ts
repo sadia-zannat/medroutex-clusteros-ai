@@ -1,29 +1,37 @@
 import { NextResponse } from "next/server";
-import { getScenarioState } from "@/lib/twin-core/state-store";
+import {
+  getOperationalTwinState,
+  getScenarioState,
+} from "@/lib/twin-core/state-store";
+import {
+  getIcuContinuityAssessment,
+  getIcuOperationalRecommendation,
+} from "@/lib/twin-core/scenario-engine";
 
 export const dynamic = "force-dynamic";
 
-/**
- * GET /api/hospital-twin/scenarios/state
- * 
- * Phase 1: Returns the current scenario state including active scenario and available scenarios.
- * Phase 2 will add scenario mutation endpoints.
- */
 export async function GET() {
-  const scenarioState = getScenarioState();
-  
+  const state = getOperationalTwinState();
   return NextResponse.json(
     {
       success: true,
-      state: scenarioState,
+      state: getScenarioState(),
+      runtimeState: state.scenarioRuntime,
+      activeIncidents: state.activeIncidents,
+      domainAssessments: state.scenarioRuntime.domainAssessments,
+      rootCauses: state.scenarioRuntime.rootCauses,
+      dependencyImpacts: state.scenarioRuntime.dependencyImpacts,
+      cascadePaths: state.scenarioRuntime.cascadePaths,
+      multiDomainPlanSet: state.scenarioRuntime.multiDomainPlanSet,
+      icuAssessment: getIcuContinuityAssessment(state),
+      icuRecommendation: getIcuOperationalRecommendation(state),
       metadata: {
-        phase: 1,
-        readOnly: true,
-        mutationNotImplemented: true,
+        phase: 2,
+        mutationImplemented: true,
+        emulatedHospitalScenario: true,
+        automaticExecution: false,
       },
     },
-    {
-      headers: { "Cache-Control": "no-store" },
-    }
+    { headers: { "Cache-Control": "no-store" } }
   );
 }

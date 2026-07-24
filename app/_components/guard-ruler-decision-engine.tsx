@@ -19,6 +19,7 @@ import type {
 
 export interface GuardRulerDecisionEngineProps {
   refreshNonce?: number;
+  onStateChanged?: () => void | Promise<void>;
 }
 
 const DECISION_STATUSES: readonly DecisionStatus[] = [
@@ -845,6 +846,7 @@ function RiskSignal({ signal }: { signal: RiskInterpretation }) {
 
 export default function GuardRulerDecisionEngine({
   refreshNonce = 0,
+  onStateChanged,
 }: GuardRulerDecisionEngineProps) {
   const [snapshot, setSnapshot] =
     useState<GuardRulerStateApiResponse | null>(null);
@@ -951,6 +953,7 @@ export default function GuardRulerDecisionEngine({
       }
       if (requestSequence !== requestSequenceRef.current) return;
       setSnapshot(payload);
+      await onStateChanged?.();
     } catch (requestError) {
       if (
         requestError instanceof DOMException &&

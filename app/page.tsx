@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import Image from "next/image";
 import type { MeshState, Gpu, ClusterType } from "../lib/medroutex/types";
 import type {
   HospitalTwinApiResponse,
@@ -9,12 +9,17 @@ import type {
   OperationalTwinSummary,
   TwinApprovalDecision,
   TwinSimulationState,
+  ScenarioRuntimeState,
 } from "../lib/twin-core/types";
 import { ResponsiveContainer, XAxis, YAxis, Tooltip, BarChart, Bar } from "recharts";
 import NotificationCenter, {
   type NotificationApiResponse,
 } from "./_components/notification-center";
 import GuardRulerDecisionEngine from "./_components/guard-ruler-decision-engine";
+import ScenarioConsole from "./_components/scenario-console";
+import LiveHardwareGpu from "./_components/live-hardware-gpu";
+import PersistencePanel from "./_components/persistence-panel";
+import { humanGpuLabel } from "../lib/medroutex/gpu-labels";
 
 interface RouteRecommendation {
   id: string;
@@ -48,6 +53,7 @@ interface DigitalTwinResult {
   estimatedDowntimeSavedMinutes: number;
   estimatedCostSaving: number;
   riskReductionPercent: number;
+  modeledOverallRiskReductionPercent: number;
   safetySummary: string;
 }
 
@@ -146,8 +152,7 @@ function getApiErrorMessage(value: unknown): string | null {
 }
 
 function formatGpuLabel(gpuId?: string): string {
-  if (gpuId === "gpu-central-7") return "Central GPU-7";
-  return gpuId ?? "No target available";
+  return humanGpuLabel(gpuId);
 }
 
 function deterministicWorkloadProgress(
@@ -209,10 +214,36 @@ const APPROVAL_UI_COPY: Record<ApprovalUiState, ApprovalUiCopy> = {
   },
 };
 
+
+const OPERATOR_SESSION_STORAGE_KEY = "medroutex-operator-session";
+
+interface StoredOperatorSession {
+  name: string;
+  role: string;
+}
+
+function isStoredOperatorSession(value: unknown): value is StoredOperatorSession {
+  return isRecord(value) &&
+    typeof value.name === "string" &&
+    value.name.trim().length > 0 &&
+    typeof value.role === "string" &&
+    value.role.trim().length > 0;
+}
+
 function getApprovalUiState(
-  activeSimulation: TwinSimulationState | null
+  activeSimulation: TwinSimulationState | null,
+  scenarioRuntime: ScenarioRuntimeState | null
 ): ApprovalUiState {
-  if (activeSimulation === null) return "not-required";
+  if (activeSimulation === null) {
+    if (
+      scenarioRuntime?.activeScenarioId !== null &&
+      scenarioRuntime?.humanApprovalRequired &&
+      scenarioRuntime.scenarioStatus === "awaiting-approval"
+    ) {
+      return "required";
+    }
+    return "not-required";
+  }
 
   if (activeSimulation.status === "awaiting-approval") return "required";
   if (
@@ -582,6 +613,37 @@ export default function Home() {
     }
   };
 
+  const refreshAfterExternalMutation = async (): Promise<void> => {
+    invalidateCanonicalTwinReads();
+    setNotificationRefreshNonce((current) => current + 1);
+    await Promise.allSettled([
+      fetchState(false),
+      fetchRecommendations(),
+      fetchDigitalTwin(),
+      fetchOperationalTwin(),
+      fetchHospitalTwin(),
+    ]);
+  };
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      try {
+        const stored = window.sessionStorage.getItem(
+          OPERATOR_SESSION_STORAGE_KEY
+        );
+        if (stored === null) return;
+        const parsed: unknown = JSON.parse(stored);
+        if (!isStoredOperatorSession(parsed)) return;
+        setOperatorName(parsed.name);
+        setOperatorRole(parsed.role);
+        setIsLoggedIn(true);
+      } catch {
+        window.sessionStorage.removeItem(OPERATOR_SESSION_STORAGE_KEY);
+      }
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
+
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       void fetchState();
@@ -614,13 +676,22 @@ export default function Home() {
   };
 
   const handleLogin = (name: string, role: string) => {
-    setOperatorName(name);
-    setOperatorRole(role);
+    const normalizedSession = {
+      name: name.trim(),
+      role: role.trim(),
+    };
+    window.sessionStorage.setItem(
+      OPERATOR_SESSION_STORAGE_KEY,
+      JSON.stringify(normalizedSession)
+    );
+    setOperatorName(normalizedSession.name);
+    setOperatorRole(normalizedSession.role);
     setIsLoggedIn(true);
     setShowLoginModal(false);
   };
 
   const handleLogout = () => {
+    window.sessionStorage.removeItem(OPERATOR_SESSION_STORAGE_KEY);
     setIsLoggedIn(false);
     setOperatorName("");
     setOperatorRole("");
@@ -656,7 +727,13 @@ export default function Home() {
   if (!meshState) return null;
 
   const activeSimulation = operationalTwinState?.activeSimulation ?? null;
-  const approvalUiState = getApprovalUiState(activeSimulation);
+  const activeScenarioRuntime = operationalTwinState?.scenarioRuntime ?? null;
+  const approvalUiState = getApprovalUiState(activeSimulation, activeScenarioRuntime);
+  const activeRuntimeStatus = activeSimulation?.status
+    ?? (activeScenarioRuntime?.activeScenarioId ? activeScenarioRuntime.scenarioStatus : null);
+  const commandScenarioLabel = activeScenarioRuntime?.activeScenarioId
+    ? activeScenarioRuntime.activeScenarioId.replace(/-/g, " ").toUpperCase()
+    : meshState.scenario.replace(/_/g, " ").toUpperCase();
   const approvalUiCopy = APPROVAL_UI_COPY[approvalUiState];
   const approvalRecommendations = recommendations.filter(
     (recommendation) => recommendation.requiresHumanApproval === true && recommendation.id.trim().length > 0
@@ -737,9 +814,9 @@ export default function Home() {
               <a href="#jobs" className="hover:text-cyan-400 transition-colors">Jobs</a>
               <a href="#analytics" className="hover:text-cyan-400 transition-colors">Analytics</a>
               <a href="#admin" className="hover:text-cyan-400 transition-colors">Admin</a>
-              <Link href="/history" className="hover:text-cyan-400 transition-colors">
-                History
-              </Link>
+              <a href="/history" className="hover:text-cyan-400 transition-colors">
+  History
+</a>
             </nav>
             <div className="flex items-center gap-3">
               <NotificationCenter
@@ -784,7 +861,7 @@ export default function Home() {
                   MedRouteX Command Center
                 </h1>
                 <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-sm text-purple-300">
-                  {meshState.scenario.replace(/_/g, " ").toUpperCase()}
+                  {commandScenarioLabel}
                 </span>
               </div>
               <p className="text-lg text-slate-400">
@@ -852,7 +929,7 @@ export default function Home() {
                 <p className="text-2xl font-bold text-amber-400">{meshState.riskyGpus}</p>
               </div>
               <div className="rounded-xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
-                <p className="text-sm text-slate-400">Estimated Saving</p>
+                <p className="text-sm text-slate-400">Current Idle Saving</p>
                 <p className="text-2xl font-bold text-teal-400">${meshState.estimatedSaving.toLocaleString()}</p>
               </div>
             </div>
@@ -897,7 +974,7 @@ export default function Home() {
                   <div>
                     <p className="text-slate-500">Active Simulation</p>
                     <p className="font-semibold text-purple-400">
-                      {activeSimulation ? activeSimulation.status : "None"}
+                      {activeRuntimeStatus ?? "None"}
                     </p>
                   </div>
                   <div>
@@ -936,12 +1013,17 @@ export default function Home() {
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Link
-                    href="/history"
-                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-teal-500/30 hover:bg-teal-500/10 hover:text-teal-200"
+                 <a href="/history" className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-teal-500/30 hover:bg-teal-500/10 hover:text-teal-200"
+>
+  View History
+</a>
+                  <a
+                    href="/api/evidence/export"
+                    download
+                    className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-200 transition-colors hover:bg-cyan-500/20"
                   >
-                    View History
-                  </Link>
+                    Export Decision Evidence
+                  </a>
                   <button
                     type="button"
                     onClick={() => void handleHospitalTwinSync()}
@@ -1082,15 +1164,34 @@ export default function Home() {
               )}
             </div>
 
+            <ScenarioConsole
+              refreshNonce={notificationRefreshNonce}
+              operatorName={operatorName}
+              operatorRole={operatorRole}
+              onStateChanged={refreshAfterExternalMutation}
+            />
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <LiveHardwareGpu
+                refreshNonce={notificationRefreshNonce}
+                onStateChanged={refreshAfterExternalMutation}
+              />
+              <PersistencePanel
+                refreshNonce={notificationRefreshNonce}
+                onStateChanged={refreshAfterExternalMutation}
+              />
+            </div>
+
             <GuardRulerDecisionEngine
               refreshNonce={notificationRefreshNonce}
+              onStateChanged={refreshAfterExternalMutation}
             />
 
             {/* Safety Strip */}
             <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 flex flex-wrap gap-4 text-sm">
               <span className="text-cyan-300">PHI-Zero Mode</span>
               <span className="text-slate-500">|</span>
-              <span className="text-cyan-300">Synthetic Data Only</span>
+              <span className="text-cyan-300">Twin: Synthetic / Emulated</span>
               <span className="text-slate-500">|</span>
               <span className="text-cyan-300">
                 {approvalUiCopy.safetyStrip}
@@ -1102,14 +1203,17 @@ export default function Home() {
           <div className="lg:col-span-1">
             <div className="sticky top-24 rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
               <div className="aspect-square rounded-xl overflow-hidden border border-white/10 bg-slate-900/50">
-                <img 
-                  src="/media/gpu-cluster-loop.gif" 
-                  alt="GPU Cluster Animation" 
+                <Image
+                  src="/media/gpu-cluster-loop.gif"
+                  alt="GPU Cluster Animation"
+                  width={720}
+                  height={720}
+                  unoptimized
                   className="h-full w-full object-cover"
                 />
               </div>
               <p className="mt-3 text-center text-sm text-slate-400">
-                Live GPU Cluster Visualization
+                Synthetic GPU Cluster Visualization
               </p>
             </div>
           </div>
@@ -1188,18 +1292,20 @@ export default function Home() {
                 </div>
               </div>
               <div className="space-y-2">
-                <p className="text-sm text-slate-400">Risk Reduction</p>
-                <p className="text-2xl font-bold text-cyan-400">{digitalTwin.riskReductionPercent}%</p>
+                <p className="text-sm text-slate-400">Risky GPU Mitigation</p>
+                <p className="text-2xl font-bold text-cyan-400">{digitalTwin.beforeRiskyGpus} → {digitalTwin.afterRiskyGpus}</p>
+                <p className="text-xs text-slate-500">{digitalTwin.riskReductionPercent}% of currently risky GPUs</p>
               </div>
               <div className="space-y-2">
-                <p className="text-sm text-slate-400">Cost Saving</p>
+                <p className="text-sm text-slate-400">Projected Cost Saving</p>
                 <p className="text-2xl font-bold text-teal-400">${digitalTwin.estimatedCostSaving.toLocaleString()}</p>
               </div>
             </div>
             <div className="mt-4 pt-4 border-t border-white/10">
               <p className="text-sm text-slate-400">
-                <span className="text-cyan-300">Downtime Saved:</span> {digitalTwin.estimatedDowntimeSavedMinutes} min | 
-                <span className="text-cyan-300 ml-2">Recommended Actions:</span> {digitalTwin.recommendedActions} | 
+                <span className="text-cyan-300">Modeled Overall Risk Reduction:</span> {digitalTwin.modeledOverallRiskReductionPercent}% |
+                <span className="text-cyan-300 ml-2">Downtime Saved:</span> {digitalTwin.estimatedDowntimeSavedMinutes} min |
+                <span className="text-cyan-300 ml-2">Recommended Actions:</span> {digitalTwin.recommendedActions} |
                 <span className="text-cyan-300 ml-2">Blocked:</span> {digitalTwin.blockedActions}
               </p>
               <p className="text-xs text-slate-500 mt-2">{digitalTwin.safetySummary}</p>
@@ -1231,13 +1337,13 @@ export default function Home() {
                           rec.safetyStatus === "warning" ? "text-amber-400 border-amber-500/30 bg-amber-500/10" :
                           "text-red-400 border-red-500/30 bg-red-500/10"
                         }`}>
-                          {rec.safetyStatus}
+                          {rec.safetyStatus === "blocked" ? "Guard Blocked" : rec.safetyStatus === "safe" ? "Guard Passed" : "Guard Warning"}
                         </span>
                         <span className={`text-xs px-2 py-1 rounded-full border ${
                           rec.privacyStatus === "allowed" ? "text-cyan-400 border-cyan-500/30 bg-cyan-500/10" :
                           "text-red-400 border-red-500/30 bg-red-500/10"
                         }`}>
-                          {rec.privacyStatus}
+                          {rec.privacyStatus === "allowed" ? "Privacy Allowed" : "Privacy Blocked"}
                         </span>
                       </div>
                     </div>
@@ -1355,7 +1461,7 @@ export default function Home() {
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
                         <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
-                          <div 
+                          <div
                             className="h-full bg-gradient-to-r from-cyan-500 to-blue-500"
                             style={{ width: `${progress}%` }}
                           ></div>
@@ -1592,7 +1698,7 @@ export default function Home() {
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-4">
-              All workloads are processed according to HIPAA-compliant privacy policies. No real patient data is used in this demo environment.
+              All workloads follow privacy-aware PHI-Zero demonstration policies. No real patient data is used in this demo environment.
             </p>
           </div>
         </div>

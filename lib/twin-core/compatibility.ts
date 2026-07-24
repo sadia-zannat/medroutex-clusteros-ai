@@ -6,7 +6,8 @@ import type {
   Workload,
 } from "../medroutex/types";
 import { TOTAL_WORKLOADS, WORKLOAD_NAMES } from "../medroutex/constants";
-import type { OperationalTwinState, TwinEntity } from "./types";
+import type { OperationalTwinState } from "./types";
+import { hasComputeCrisisTelemetry } from "./scenario-identity";
 
 const COMPATIBILITY_PRIORITIES: readonly Workload["priority"][] = [
   "critical",
@@ -91,15 +92,10 @@ export function deriveMeshStateFromOperationalTwin(
     (e) => e.entityType === "compute-node"
   );
 
-  // Use scenario parameter to determine crisis state
-  const isCrisis = scenario === "medroutex-stroke-crisis";
-
-  // If we have crisis-specific GPU entities, use them; otherwise generate baseline GPUs
-  const hasCrisisGPUs = isCrisis && gpuEntities.some((e) => 
-    e.id === "compute-local-gpu-02" || 
-    e.id === "compute-local-gpu-03" || 
-    e.id === "compute-central-gpu-07"
-  );
+  // Use canonical telemetry rather than the overall hospital status or a
+  // stroke-only scenario label. This preserves GPU crisis cards during
+  // Hospital Sync and in the cross-domain Hospital Cascade scenario.
+  const hasCrisisGPUs = hasComputeCrisisTelemetry(operationalTwin);
 
   let gpus: Gpu[];
   

@@ -1,29 +1,25 @@
 import { NextResponse } from "next/server";
 import { getScenarioCatalog } from "@/lib/twin-core/scenario-catalog";
+import { getOperationalTwinState } from "@/lib/twin-core/state-store";
 
 export const dynamic = "force-dynamic";
 
-/**
- * GET /api/hospital-twin/scenarios
- * 
- * Phase 1: Returns the deterministic scenario catalog.
- * Phase 2 will add scenario mutation endpoints.
- */
 export async function GET() {
-  const catalog = getScenarioCatalog();
-  
+  const state = getOperationalTwinState();
   return NextResponse.json(
     {
       success: true,
-      catalog,
+      catalog: getScenarioCatalog(),
+      activeScenarioId: state.scenarioRuntime.activeScenarioId,
+      activeStatus: state.scenarioRuntime.scenarioStatus,
       metadata: {
-        phase: 1,
-        readOnly: true,
-        mutationNotImplemented: true,
+        phase: 2,
+        readOnlyCatalog: true,
+        executionEndpoint: "/api/hospital-twin/scenarios/run",
+        safetyLabel: "EMULATED HOSPITAL OPERATIONAL SCENARIO",
+        automaticExecution: false,
       },
     },
-    {
-      headers: { "Cache-Control": "no-store" },
-    }
+    { headers: { "Cache-Control": "no-store" } }
   );
 }

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "outDir": ".core-test",
+    "rootDir": ".",
+    "types": ["node"],
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": [
+    "tests/core-regression.ts",
+    "lib/medroutex/**/*.ts",
+    "lib/guard-ruler/**/*.ts",
+    "lib/twin-core/**/*.ts",
+    "lib/hardware/**/*.ts"
+  ],
+  "exclude": [
+    "lib/twin-core/email-provider.ts",
+    "lib/twin-core/email-service.ts"
+  ]
+}

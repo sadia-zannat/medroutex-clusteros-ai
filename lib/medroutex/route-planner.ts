@@ -87,11 +87,17 @@ function blockedReasonLabel(evaluation: GuardEvaluation): string {
   ) {
     return "privacy blocked";
   }
-  if (codes.has("GPU_OFFLINE")) return "offline";
+  if (codes.has("GPU_OFFLINE")) return "GPU offline";
+  if (codes.has("GPU_RISK_EXCEEDS_LIMIT")) return "GPU risk exceeds limit";
   if (codes.has("TELEMETRY_UNTRUSTED")) return "telemetry untrusted";
   if (codes.has("CRITICAL_DEADLINE_MISS")) return "deadline missed";
   if (codes.has("INSUFFICIENT_CAPACITY")) return "insufficient capacity";
-  return "Guard blocked";
+  if (codes.has("CRITICAL_WORKLOAD_INTERRUPTION")) return "critical workload interruption";
+  if (codes.has("POWER_DEPENDENCY_UNAVAILABLE")) return "power dependency unavailable";
+  if (codes.has("NETWORK_DEPENDENCY_UNAVAILABLE")) return "network dependency unavailable";
+  if (codes.has("ICU_CONTINUITY_UNAVAILABLE")) return "ICU continuity unavailable";
+  if (codes.has("OXYGEN_CONTINUITY_UNAVAILABLE")) return "oxygen continuity unavailable";
+  return "hard safety constraint";
 }
 
 function legacyBlockedTargetLabel(
@@ -190,7 +196,11 @@ function blockedRecommendation(
     action: "manual_review",
     requiresHumanApproval: false,
     deadlineSeconds: candidate.deadlineSeconds,
-    explanation: `Guard ${evaluation.status}: ${blockedReasonLabel(evaluation)}. ${result.explanation.decisionSupportDisclaimer}`,
+    explanation: `${
+      evaluation.status === "blocked"
+        ? "Guard blocked this route"
+        : "Guard requires manual review"
+    }: ${blockedReasonLabel(evaluation)}. ${result.explanation.decisionSupportDisclaimer}`,
   };
 }
 

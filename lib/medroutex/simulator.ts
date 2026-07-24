@@ -1,5 +1,5 @@
-import type { Gpu, Workload, ClusterSummary, AuditLog, MeshState, ClusterType, GpuStatus, WorkloadPriority, PrivacyPolicy } from "./types";
-import { SCENARIOS, WORKLOAD_NAMES, CLUSTER_SETUP, TOTAL_GPUS, TOTAL_WORKLOADS } from "./constants";
+import type { Gpu, Workload, ClusterSummary, AuditLog, MeshState, GpuStatus, WorkloadPriority, PrivacyPolicy } from "./types";
+import { SCENARIOS, WORKLOAD_NAMES, CLUSTER_SETUP, TOTAL_WORKLOADS } from "./constants";
 import { calculateGpuRiskScore, calculateHealthScore, getRiskLevel } from "./risk-engine";
 
 function generateId(prefix: string): string {
@@ -8,8 +8,6 @@ function generateId(prefix: string): string {
 
 function createBaseGpus(): Gpu[] {
   const gpus: Gpu[] = [];
-  let gpuIndex = 0;
-
   // Local cluster - 4 GPUs
   for (let i = 0; i < 4; i++) {
     gpus.push({
@@ -32,7 +30,6 @@ function createBaseGpus(): Gpu[] {
       idleMinutes: 15 + i * 5,
       standbyEligible: false,
     });
-    gpuIndex++;
   }
 
   // Central cluster - 4 GPUs
@@ -57,7 +54,6 @@ function createBaseGpus(): Gpu[] {
       idleMinutes: 10 + i * 3,
       standbyEligible: false,
     });
-    gpuIndex++;
   }
 
   // Cloud cluster - 2 GPUs
@@ -82,7 +78,6 @@ function createBaseGpus(): Gpu[] {
       idleMinutes: 5 + i * 2,
       standbyEligible: false,
     });
-    gpuIndex++;
   }
 
   return gpus;
@@ -123,7 +118,7 @@ function applyScenario(gpus: Gpu[], workloads: Workload[], scenario: string): { 
   switch (scenario) {
     case "normal_day":
       // Normal operation - small variations
-      modifiedGpus.forEach((gpu, i) => {
+      modifiedGpus.forEach((gpu) => {
         gpu.temperature += Math.random() * 5 - 2.5;
         gpu.utilization += Math.random() * 10 - 5;
       });

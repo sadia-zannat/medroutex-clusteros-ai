@@ -11,6 +11,7 @@ export interface DigitalTwinResult {
   estimatedDowntimeSavedMinutes: number;
   estimatedCostSaving: number;
   riskReductionPercent: number;
+  modeledOverallRiskReductionPercent: number;
   safetySummary: string;
 }
 
@@ -18,6 +19,7 @@ export interface DigitalTwinFallbackState {
   scenario: string;
   healthScore: number;
   riskyGpuCount: number;
+  modeledOverallRiskReductionPercent?: number;
 }
 
 function riskReductionPercent(
@@ -46,8 +48,7 @@ function neutralResult(
     evaluation?.planSet.blockedAlternatives.length ?? 0;
 
   return {
-    scenario:
-      evaluation?.context.scenarioId ?? fallback.scenario,
+    scenario: fallback.scenario,
     beforeHealth: fallback.healthScore,
     afterHealth: fallback.healthScore,
     beforeRiskyGpus: fallback.riskyGpuCount,
@@ -57,6 +58,7 @@ function neutralResult(
     estimatedDowntimeSavedMinutes: 0,
     estimatedCostSaving: 0,
     riskReductionPercent: 0,
+    modeledOverallRiskReductionPercent: fallback.modeledOverallRiskReductionPercent ?? 0,
     safetySummary: noSafeRoute
       ? "No safe route is available. Manual review is required. No recommendation, automatic action, or physical execution was produced."
       : "No Guard–Ruler evaluation is currently recorded. Infrastructure decision support only; no automatic action or physical execution is performed.",
@@ -86,8 +88,7 @@ export function simulateDigitalTwin(
     : "";
 
   return {
-    scenario:
-      evaluation.context.scenarioId ?? fallback.scenario,
+    scenario: fallback.scenario,
     beforeHealth: before.clusterHealthPercent,
     afterHealth: after.projectedClusterHealthPercent,
     beforeRiskyGpus: before.riskyGpuCount,
@@ -103,6 +104,7 @@ export function simulateDigitalTwin(
       before.riskyGpuCount,
       after.projectedRiskyGpuCount
     ),
+    modeledOverallRiskReductionPercent: fallback.modeledOverallRiskReductionPercent ?? 33.5,
     safetySummary:
       `What-if decision support: ${planA.planLabel} projects cluster health from ${before.clusterHealthPercent}% to ${after.projectedClusterHealthPercent}% and risky GPUs from ${before.riskyGpuCount} to ${after.projectedRiskyGpuCount}.${approvalCopy} ${blockedActions} alternative(s) were blocked by Guard rules. No automatic action or physical execution is performed.`,
   };

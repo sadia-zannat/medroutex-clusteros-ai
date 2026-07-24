@@ -301,6 +301,8 @@ export type OperationalEventType =
   | "telemetry-offline"
   | "icu-capacity-critical"
   | "icu-device-availability-critical"
+  | "icu-dependency-assessment"
+  | "icu-recommendation-prepared"
   | "oxygen-warning"
   | "oxygen-critical"
   | "oxygen-action-required"
@@ -342,7 +344,8 @@ export type OperationalSourceLabel =
   | "MedRouteX Hospital Twin"
   | "MedRouteX Notification Service"
   | "Resend HTTP Email Provider"
-  | "Email Alerts Disabled";
+  | "Email Alerts Disabled"
+  | "Live Local Hardware Telemetry";
 
 export type OperationalRole =
   | "Radiology Operator"
@@ -825,7 +828,11 @@ export type UnifiedHistoryKind =
   | "notification"
   | "email-delivery"
   | "twin-snapshot"
-  | "audit-event";
+  | "audit-event"
+  | "incident"
+  | "scenario-root-cause"
+  | "cascade-path"
+  | "response-plan";
 
 export interface UnifiedHistoryRecord {
   id: string;
@@ -955,6 +962,9 @@ export interface OperationalTwinState {
   overallRiskScore: number;
   simulationOnly: boolean;
   clinicalDisclaimer: string;
+  scenarioRuntime: ScenarioRuntimeState;
+  liveHardwareGpu: LiveGpuTelemetry | null;
+  persistence: PersistenceStatus;
 }
 
 export interface OperationalTwinSummary {
@@ -1002,12 +1012,20 @@ export const RESILIENCE_MODEL_BOUNDARY: string =
   "Team Delta operational decision-support model. Not a certified hospital safety calculation.";
 
 /**
- * Multi-domain scenario engine contracts.
+ * Multi-domain hospital continuity scenario contracts.
  *
- * These contracts define deterministic scenario metadata and state for Phase 1.
- * Phase 1 provides read-only scenario catalog and state inspection.
- * Phase 2 will add scenario mutation and execution behavior.
+ * These contracts model infrastructure operations only. They never contain
+ * patient identity, diagnosis, treatment recommendations, or actuator control.
  */
+
+export type HospitalScenarioId =
+  | "normal-operations"
+  | "stroke-compute-crisis"
+  | "icu-capacity-stress"
+  | "oxygen-continuity-risk"
+  | "power-continuity-failure"
+  | "network-continuity-failure"
+  | "hospital-cascade-crisis";
 
 export type ScenarioDomain =
   | "compute"
@@ -1028,7 +1046,7 @@ export type ScenarioCategory =
   | "cascade-crisis";
 
 export interface ScenarioContract {
-  id: string;
+  id: HospitalScenarioId;
   name: string;
   description: string;
   domain: ScenarioDomain;
@@ -1039,8 +1057,10 @@ export interface ScenarioContract {
   affectedDomains: readonly ScenarioDomain[];
   dependencies: readonly string[];
   warnings: readonly string[];
+  executable: boolean;
+  safetyLabel: "EMULATED HOSPITAL OPERATIONAL SCENARIO";
   metadata: {
-    phase: 1;
+    phase: 2;
     deterministic: true;
     patientData: false;
     diagnosis: false;
@@ -1056,19 +1076,265 @@ export interface ScenarioCatalog {
     totalScenarios: number;
     domains: readonly ScenarioDomain[];
     categories: readonly ScenarioCategory[];
+    executableScenarioCount: number;
   };
 }
 
 export interface ScenarioState {
-  activeScenarioId: string | null;
+  activeScenarioId: HospitalScenarioId | null;
   activeScenarioName: string | null;
   activeScenarioStatus: TwinScenarioStatus | null;
   availableScenarios: readonly ScenarioContract[];
   canActivateScenario: boolean;
   lastScenarioTransitionAt: string | null;
   metadata: {
-    phase: 1;
-    readOnly: true;
-    mutationNotImplemented: true;
+    phase: 2;
+    readOnly: false;
+    mutationImplemented: true;
   };
+}
+
+export interface ScenarioRootCause {
+  id: string;
+  scenarioId: HospitalScenarioId;
+  entityId: string;
+  domain: ScenarioDomain;
+  severity: ScenarioSeverity;
+  title: string;
+  evidence: string[];
+  timeToFailureSeconds: number | null;
+  timeToFailureBand: TimeToFailureBand;
+  confidence: number;
+}
+
+export interface CascadeNode {
+  entityId: string;
+  entityLabel: string;
+  domain: ScenarioDomain;
+  depth: number;
+  impactSeverity: ScenarioSeverity;
+  confidence: number;
+  timeToImpactSeconds: number | null;
+  timeToImpactBand: TimeToFailureBand;
+  reason: string;
+  viaRelationshipId: string | null;
+}
+
+export interface CascadePath {
+  id: string;
+  scenarioId: HospitalScenarioId;
+  rootCauseId: string;
+  rootEntityId: string;
+  nodeEntityIds: string[];
+  relationshipIds: string[];
+  nodes: CascadeNode[];
+  severity: ScenarioSeverity;
+  confidence: number;
+  timeToImpactSeconds: number | null;
+  timeToImpactBand: TimeToFailureBand;
+  explanation: string;
+}
+
+export interface DependencyImpact {
+  id: string;
+  scenarioId: HospitalScenarioId;
+  sourceEntityId: string;
+  affectedEntityId: string;
+  relationshipId: string;
+  relationshipType: TwinRelationshipType;
+  severity: ScenarioSeverity;
+  confidence: number;
+  timeToImpactSeconds: number | null;
+  explanation: string;
+}
+
+export interface DomainContinuityAssessment {
+  domain: Exclude<ScenarioDomain, "hospital-cascade">;
+  score: number;
+  status: HospitalOperationalStatus;
+  severity: ScenarioSeverity;
+  evidence: string[];
+  dependencyEntityIds: string[];
+  timeToFailureSeconds: number | null;
+  timeToFailureBand: TimeToFailureBand;
+  confidence: number;
+  sourceLabel:
+    | "Synthetic GPU Telemetry"
+    | "Emulated Hospital Telemetry"
+    | "Live Local Hardware Telemetry";
+}
+
+export interface HospitalResponseAction {
+  id: string;
+  domain: ScenarioDomain;
+  title: string;
+  description: string;
+  priority: "immediate" | "high" | "planned";
+  requiresHumanApproval: boolean;
+  policyPermitted: boolean;
+  physicalExecutionPerformed: false;
+}
+
+export interface MultiDomainCandidatePlan {
+  id: string;
+  scenarioId: HospitalScenarioId;
+  title: string;
+  rank: 1 | 2 | 3 | null;
+  status: "eligible" | "blocked" | "manual-review";
+  score: number;
+  confidence: number;
+  guardReasons: string[];
+  affectedDomains: ScenarioDomain[];
+  recommendedActions: HospitalResponseAction[];
+  actionsExplicitlyNotExecuted: string[];
+  dependencyImpacts: DependencyImpact[];
+  timeToFailureMitigated: TimeToFailureBand[];
+  beforeResilienceScore: number;
+  projectedResilienceScore: number;
+  remainingRisks: string[];
+  requiresHumanApproval: boolean;
+  decisionSupportDisclaimer: string;
+  evaluatedStateVersion: number;
+  evaluatedAt: string;
+}
+
+export interface MultiDomainPlanSet {
+  status: "plans-available" | "no-safe-plan";
+  planA: MultiDomainCandidatePlan | null;
+  planB: MultiDomainCandidatePlan | null;
+  planC: MultiDomainCandidatePlan | null;
+  rankedPlans: MultiDomainCandidatePlan[];
+  blockedPlans: MultiDomainCandidatePlan[];
+  scoringFormula: string;
+  weights: {
+    criticalServiceContinuity: 30;
+    timeToFailureMitigation: 25;
+    dependencyRiskReduction: 20;
+    implementationLatency: 10;
+    operationalReversibility: 10;
+    approvalComplexity: 5;
+  };
+}
+
+export interface ScenarioRecoveryState {
+  status: "not-started" | "monitoring" | "recovering" | "recovered" | "failed";
+  confirmationCycles: number;
+  requiredConfirmationCycles: number;
+  startedAt: string | null;
+  recoveredAt: string | null;
+  evidence: string[];
+}
+
+export interface ScenarioRuntimeState {
+  activeScenarioId: HospitalScenarioId | null;
+  scenarioStatus: TwinScenarioStatus | null;
+  startedAt: string | null;
+  lastTransitionAt: string | null;
+  stateVersionStarted: number | null;
+  affectedDomains: readonly ScenarioDomain[];
+  severity: ScenarioSeverity | null;
+  activeIncidentIds: readonly string[];
+  rootCauseIds: readonly string[];
+  transitionKey: string | null;
+  executionCount: number;
+  recoveryStatus: "not-recovering" | "recovering" | "recovered" | "failed";
+  humanApprovalRequired: boolean;
+  physicalExecutionPerformed: false;
+  rootCauses: readonly ScenarioRootCause[];
+  dependencyImpacts: readonly DependencyImpact[];
+  cascadePaths: readonly CascadePath[];
+  domainAssessments: readonly DomainContinuityAssessment[];
+  multiDomainPlanSet: MultiDomainPlanSet | null;
+  recovery: ScenarioRecoveryState;
+  metadata: {
+    phase: 2;
+    deterministic: true;
+    patientData: false;
+    diagnosis: false;
+    actuatorExecution: false;
+  };
+}
+
+export interface ScenarioExecutionResult {
+  success: boolean;
+  outcome: "applied" | "idempotent" | "not-implemented" | "invalid-request";
+  scenarioId: string;
+  scenarioName: string;
+  transitionKey: string;
+  stateVersion: number;
+  previousStateVersion: number;
+  runtimeState: ScenarioRuntimeState;
+  fullState?: OperationalTwinState;
+  hospitalHealthScore: number;
+  hospitalResilienceScore: number;
+  domainScores: HospitalDomainScoreSummary;
+  eventsCreated: number;
+  notificationsCreated: number;
+  incidentsCreated: number;
+  snapshotCreated: boolean;
+  humanApprovalRequired: boolean;
+  physicalExecutionPerformed: false;
+  error: string | null;
+  metadata: {
+    phase: 2;
+    deterministic: true;
+    sourceLabel: "MedRouteX Hospital Twin";
+  };
+}
+
+export interface IcuContinuityAssessment {
+  totalBeds: number;
+  occupiedBeds: number;
+  occupancyPercentage: number;
+  criticalBedDemand: number;
+  ventilatorsAvailable: number;
+  ventilatorsInUse: number;
+  devicesOffline: number;
+  oxygenDemandLitersPerMinute: number;
+  continuityScore: number;
+  status: HospitalOperationalStatus;
+  affectedDomains: readonly ScenarioDomain[];
+  affectedDependencies: readonly string[];
+  evidence: readonly string[];
+  confidence: number;
+  sourceLabel: "Emulated Hospital Telemetry";
+  emulated: true;
+}
+
+export interface IcuOperationalRecommendation {
+  recommendationId: string;
+  scenarioId: HospitalScenarioId;
+  priority: "preserve-capacity" | "prioritize-resources" | "delay-workloads" | "review-maintenance" | "prepare-support";
+  title: string;
+  description: string;
+  affectedDomains: readonly ScenarioDomain[];
+  requiresHumanReview: boolean;
+  infrastructureActions: readonly string[];
+  medicalDisclaimer: string;
+  sourceLabel: "MedRouteX Hospital Twin";
+  emulated: true;
+}
+
+export interface LiveGpuTelemetry {
+  connectionStatus: "connected" | "unavailable" | "error";
+  collectedAt: string;
+  provider: "nvidia-smi";
+  sourceLabel: "Live Local Hardware Telemetry";
+  quality: HospitalTelemetryQuality;
+  gpuName: string | null;
+  temperatureC: number | null;
+  utilizationPercent: number | null;
+  memoryUsedMiB: number | null;
+  memoryTotalMiB: number | null;
+  powerDrawWatts: number | null;
+  error: string | null;
+  simulationProtected: true;
+}
+
+export interface PersistenceStatus {
+  mode: "memory-only" | "sqlite-local";
+  databasePath: string | null;
+  lastPersistedAt: string | null;
+  lastRestoredAt: string | null;
+  lastError: string | null;
 }

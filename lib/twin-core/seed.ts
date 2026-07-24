@@ -7,6 +7,7 @@ import {
   type TwinRelationship,
   type TwinSimulationState,
   type TwinTelemetryPoint,
+  type ScenarioRuntimeState,
 } from "./types";
 import {
   appendHospitalSnapshot,
@@ -19,7 +20,44 @@ import {
 } from "./providers";
 import { createBaselineResetEvent } from "./operational-events";
 
-const BASELINE_TIMESTAMP = "2024-01-15T10:30:00.000Z";
+export const BASELINE_TIMESTAMP = "2024-01-15T10:30:00.000Z";
+
+export const INITIAL_SCENARIO_RUNTIME: ScenarioRuntimeState = {
+  activeScenarioId: null,
+  scenarioStatus: null,
+  startedAt: null,
+  lastTransitionAt: null,
+  stateVersionStarted: null,
+  affectedDomains: [],
+  severity: null,
+  activeIncidentIds: [],
+  rootCauseIds: [],
+  transitionKey: null,
+  executionCount: 0,
+  recoveryStatus: "not-recovering",
+  humanApprovalRequired: false,
+  physicalExecutionPerformed: false,
+  rootCauses: [],
+  dependencyImpacts: [],
+  cascadePaths: [],
+  domainAssessments: [],
+  multiDomainPlanSet: null,
+  recovery: {
+    status: "not-started",
+    confirmationCycles: 0,
+    requiredConfirmationCycles: 2,
+    startedAt: null,
+    recoveredAt: null,
+    evidence: [],
+  },
+  metadata: {
+    phase: 2,
+    deterministic: true,
+    patientData: false,
+    diagnosis: false,
+    actuatorExecution: false,
+  },
+};
 
 function createEntity(input: {
   id: string;
@@ -680,6 +718,15 @@ function createInitialStateWithoutSnapshot(): OperationalTwinState {
     overallRiskScore: 12,
     simulationOnly: true,
     clinicalDisclaimer: INFRASTRUCTURE_CLINICAL_DISCLAIMER,
+    scenarioRuntime: INITIAL_SCENARIO_RUNTIME,
+    liveHardwareGpu: null,
+    persistence: {
+      mode: "memory-only",
+      databasePath: null,
+      lastPersistedAt: null,
+      lastRestoredAt: null,
+      lastError: null,
+    },
   };
 
   const providers = [
@@ -855,7 +902,7 @@ export function applyCrisisScenario(
         explanation: "Recommended target if a later approved migration executes",
       },
     ],
-    predictedRiskReductionPercent: 67,
+    predictedRiskReductionPercent: 33.5,
     predictedRecoveryMinutes: 2,
     requiresHumanApproval: true,
     recommendationId: "rec-workload-stroke-ct-001-0",
@@ -877,6 +924,42 @@ export function applyCrisisScenario(
     entities,
     latestTelemetry: mergeTelemetry(state.latestTelemetry, crisisTelemetry),
     activeSimulation,
+    scenarioRuntime: {
+      activeScenarioId: "stroke-compute-crisis",
+      scenarioStatus: "awaiting-approval",
+      startedAt: crisisTimestamp,
+      lastTransitionAt: crisisTimestamp,
+      stateVersionStarted: version,
+      affectedDomains: ["compute", "power", "network"],
+      severity: "critical",
+      activeIncidentIds: [],
+      rootCauseIds: ["compute-local-gpu-02", "compute-local-gpu-03"],
+      transitionKey: `stroke-compute-crisis-v${state.version}`,
+      executionCount: 1,
+      recoveryStatus: "not-recovering",
+      humanApprovalRequired: true,
+      physicalExecutionPerformed: false,
+      rootCauses: [],
+      dependencyImpacts: [],
+      cascadePaths: [],
+      domainAssessments: [],
+      multiDomainPlanSet: null,
+      recovery: {
+        status: "not-started",
+        confirmationCycles: 0,
+        requiredConfirmationCycles: 2,
+        startedAt: null,
+        recoveredAt: null,
+        evidence: [],
+      },
+      metadata: {
+        phase: 2,
+        deterministic: true,
+        patientData: false,
+        diagnosis: false,
+        actuatorExecution: false,
+      },
+    },
   };
   const domains = deriveHospitalDomains(stateWithScenario);
   const resilienceSummary = calculateHospitalResilience(

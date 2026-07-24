@@ -5,7 +5,12 @@ import {
   type OperationalEventDomain,
   type OperationalEventSeverity,
   type OperationalNotification,
+  type OperationalIncident,
   type OperationalTwinState,
+  type ScenarioRootCause,
+  type CascadePath,
+  type MultiDomainCandidatePlan,
+  type ScenarioDomain,
   type TwinApprovalAuditEvent,
   type TwinSnapshot,
   type UnifiedHistoryKind,
@@ -30,6 +35,10 @@ const HISTORY_KINDS: readonly UnifiedHistoryKind[] = [
   "email-delivery",
   "twin-snapshot",
   "audit-event",
+  "incident",
+  "scenario-root-cause",
+  "cascade-path",
+  "response-plan",
 ];
 
 const EVENT_SEVERITIES: readonly OperationalEventSeverity[] = [
@@ -475,6 +484,139 @@ function auditRecord(
   };
 }
 
+
+function scenarioDomainToEventDomain(domain: ScenarioDomain): OperationalEventDomain {
+  return domain === "hospital-cascade" ? "simulation" : domain;
+}
+
+function incidentRecord(
+  incident: OperationalIncident,
+  stateVersion: number,
+  activeScenarioId: string | null
+): UnifiedHistoryRecord {
+  return {
+    id: `history:incident:${incident.id}`,
+    sourceId: incident.id,
+    kind: "incident",
+    timestamp: incident.updatedAt || incident.openedAt,
+    title: incident.title,
+    message: incident.reason,
+    severity: incident.severity,
+    domain: incident.domain,
+    category: "incident",
+    status: incident.status,
+    source: "MedRouteX Hospital Twin",
+    simulationOnly: incident.simulationOnly,
+    correlationId: incident.correlationId,
+    sourceEntityIds: [...incident.sourceEntityIds],
+    stateVersion,
+    metadata: {
+      openedAt: incident.openedAt,
+      updatedAt: incident.updatedAt,
+      affectedZones: [...incident.affectedZones],
+      ...(activeScenarioId ? { scenarioId: activeScenarioId } : {}),
+    },
+  };
+}
+
+function rootCauseRecord(
+  cause: ScenarioRootCause,
+  timestamp: string,
+  stateVersion: number
+): UnifiedHistoryRecord {
+  return {
+    id: `history:scenario-root-cause:${cause.id}`,
+    sourceId: cause.id,
+    kind: "scenario-root-cause",
+    timestamp,
+    title: cause.title,
+    message: cause.evidence.join(" · "),
+    severity: cause.severity === "critical" ? "critical" : cause.severity === "high" ? "warning" : "info",
+    domain: scenarioDomainToEventDomain(cause.domain),
+    category: "risk",
+    status: "active",
+    source: "MedRouteX Hospital Twin",
+    simulationOnly: true,
+    correlationId: cause.scenarioId,
+    sourceEntityIds: [cause.entityId],
+    stateVersion,
+    metadata: {
+      scenarioId: cause.scenarioId,
+      timeToFailureSeconds: cause.timeToFailureSeconds,
+      timeToFailureBand: cause.timeToFailureBand,
+      confidence: cause.confidence,
+      evidence: [...cause.evidence],
+    },
+  };
+}
+
+function cascadePathRecord(
+  path: CascadePath,
+  timestamp: string,
+  stateVersion: number
+): UnifiedHistoryRecord {
+  return {
+    id: `history:cascade-path:${path.id}`,
+    sourceId: path.id,
+    kind: "cascade-path",
+    timestamp,
+    title: `Dependency Cascade: ${path.nodes.map((node) => node.entityLabel).join(" → ")}`,
+    message: path.explanation,
+    severity: path.severity === "critical" ? "critical" : path.severity === "high" ? "warning" : "info",
+    domain: "simulation",
+    category: "risk",
+    status: "active",
+    source: "MedRouteX Hospital Twin",
+    simulationOnly: true,
+    correlationId: path.scenarioId,
+    sourceEntityIds: [...path.nodeEntityIds],
+    stateVersion,
+    metadata: {
+      scenarioId: path.scenarioId,
+      rootCauseId: path.rootCauseId,
+      relationshipIds: [...path.relationshipIds],
+      timeToImpactSeconds: path.timeToImpactSeconds,
+      timeToImpactBand: path.timeToImpactBand,
+      confidence: path.confidence,
+    },
+  };
+}
+
+function responsePlanRecord(
+  plan: MultiDomainCandidatePlan,
+  timestamp: string,
+  stateVersion: number
+): UnifiedHistoryRecord {
+  return {
+    id: `history:response-plan:${plan.id}`,
+    sourceId: plan.id,
+    kind: "response-plan",
+    timestamp,
+    title: `${plan.rank ? `Plan ${String.fromCharCode(64 + plan.rank)}` : "Response Plan"}: ${plan.title}`,
+    message: plan.status === "blocked" ? plan.guardReasons.join(" · ") : plan.recommendedActions.map((action) => action.title).join(" · "),
+    severity: plan.status === "blocked" ? "warning" : plan.requiresHumanApproval ? "action-required" : "info",
+    domain: "simulation",
+    category: "plan",
+    status: plan.status,
+    source: "MedRouteX Hospital Twin",
+    simulationOnly: true,
+    correlationId: plan.scenarioId,
+    sourceEntityIds: [...new Set(plan.dependencyImpacts.flatMap((impact) => [impact.sourceEntityId, impact.affectedEntityId]))],
+    stateVersion,
+    metadata: {
+      scenarioId: plan.scenarioId,
+      rank: plan.rank,
+      score: plan.score,
+      confidence: plan.confidence,
+      affectedDomains: [...plan.affectedDomains],
+      requiresHumanApproval: plan.requiresHumanApproval,
+      physicalExecutionPerformed: false,
+      projectedResilienceScore: plan.projectedResilienceScore,
+      remainingRisks: [...plan.remainingRisks],
+    },
+  };
+}
+
 export function normalizeUnifiedHistory(
   state: OperationalTwinState
 ): UnifiedHistoryRecord[] {
@@ -501,6 +643,21 @@ export function normalizeUnifiedHistory(
     ),
     ...approvalAudits.map((audit) =>
       auditRecord(audit, events, snapshots, state.version)
+    ),
+    ...(state.activeIncidents ?? []).map((incident) =>
+      incidentRecord(incident, state.version, state.scenarioRuntime.activeScenarioId)
+    ),
+    ...state.scenarioRuntime.rootCauses.map((cause) =>
+      rootCauseRecord(cause, state.scenarioRuntime.lastTransitionAt ?? state.lastSynchronizedAt, state.version)
+    ),
+    ...state.scenarioRuntime.cascadePaths.map((path) =>
+      cascadePathRecord(path, state.scenarioRuntime.lastTransitionAt ?? state.lastSynchronizedAt, state.version)
+    ),
+    ...(state.scenarioRuntime.multiDomainPlanSet?.rankedPlans ?? []).map((plan) =>
+      responsePlanRecord(plan, state.scenarioRuntime.lastTransitionAt ?? state.lastSynchronizedAt, state.version)
+    ),
+    ...(state.scenarioRuntime.multiDomainPlanSet?.blockedPlans ?? []).map((plan) =>
+      responsePlanRecord(plan, state.scenarioRuntime.lastTransitionAt ?? state.lastSynchronizedAt, state.version)
     ),
   ];
 
@@ -565,6 +722,9 @@ export function recordMatchesHistorySection(
       return record.kind === "notification";
     case "incidents-risks":
       return (
+        record.kind === "incident" ||
+        record.kind === "scenario-root-cause" ||
+        record.kind === "cascade-path" ||
         record.category === "incident" ||
         record.category === "risk" ||
         (record.kind === "operational-event" && record.status === "active")
@@ -574,6 +734,7 @@ export function recordMatchesHistorySection(
     case "decisions-audit":
       return (
         record.kind === "audit-event" ||
+        record.kind === "response-plan" ||
         record.domain === "approval" ||
         record.category === "approval" ||
         record.category === "audit" ||
